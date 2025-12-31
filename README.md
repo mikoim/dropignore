@@ -1,0 +1,35 @@
+# dropignore
+
+CLI tool that watches a directory with inotify and marks matching paths with Dropbox's `com.dropbox.ignored` extended attribute. Designed for performance, maintainability, and easy rule expansion.
+
+## Features
+- Recursive watch starting at a user-specified root, using dynamic inotify registrations.
+- Rule-based matching (currently: `node_modules`, Cargo `target` with adjacent `Cargo.toml`, Python virtualenvs `venv`/`.venv`, and `*.egg-info`).
+- Skips descending into ignored subtrees to avoid unnecessary watches.
+- Dry-run mode logs intended actions without calling `setxattr`.
+- Detailed logging via `env_logger`.
+
+## Usage
+```bash
+cargo run -- --dry-run /home/foo/Dropbox  # inspect what would be ignored
+cargo run -- /home/foo/Dropbox            # apply Dropbox ignore attribute
+```
+
+### Logging
+Logs default to `info`. Override with `RUST_LOG`, e.g.:
+```bash
+RUST_LOG=debug cargo run -- --dry-run /home/foo/Dropbox
+```
+
+## How it works
+1. Seeds watches for all traversable subdirectories under the root, skipping any directory matched by a rule.
+2. Applies `com.dropbox.ignored=1` to any matched path (or logs in dry-run).
+3. Listens for create/move-in events and processes new paths, adding watches for newly discovered directories unless a rule says to skip descendants.
+
+## Testing
+```bash
+cargo test
+```
+
+## Extending rules
+Add a new type implementing the `Rule` trait in `src/main.rs`, return the desired `MatchAction`, and register it in `RuleEngine::new`. The existing rules serve as templates.
