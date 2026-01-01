@@ -1,0 +1,183 @@
+use crate::rules::{Candidate, RuleEngine};
+use anyhow::Result;
+use log::{debug, warn};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// Directories to watch and matching paths discovered during a filesystem walk.
+#[derive(Debug, Default)]
+pub(crate) struct DiscoveredPaths {
+    pub(crate) watchers: Vec<PathBuf>,
+    pub(crate) matches: Vec<PathBuf>,
+}
+
+/// Walk the directory tree rooted at `start` and gather:
+/// - All directories that should be watched (excluding ignored subtrees).
+/// - All paths that satisfy a matching rule.
+pub(crate) fn discover_watch_targets(start: &Path, rules: &RuleEngine) -> Result<DiscoveredPaths> {
+    let mut discovered = DiscoveredPaths::default();
+    let mut stack = vec![start.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let metadata = match fs::metadata(&dir) {
+            Ok(meta) => meta,
+            Err(err) => {
+                warn!("Skipping {}: {err}", dir.display());
+                continue;
+            }
+        };
+
+        let candidate = Candidate {
+            path: &dir,
+            metadata: &metadata,
+        };
+
+        if let Some(action) = rules.evaluate_action(&candidate) {
+            if action.set_dropbox_ignore {
+                discovered.matches.push(dir.clone());
+            }
+
+            if action.skip_descendants {
+                // Do not traverse further down this subtree.
+                continue;
+            }
+        }
+
+        discovered.watchers.push(dir.clone());
+
+        let read_dir = match fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(err) => {
+                warn!("Failed to read {}: {err}", dir.display());
+                continue;
+            }
+        };
+
+        for entry in read_dir {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(err) => {
+                    warn!("Error iterating inside {}: {err}", dir.display());
+                    continue;
+                }
+            };
+
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(err) => {
+                    warn!("Error reading file type under {}: {err}", dir.display());
+                    continue;
+                }
+            };
+
+            if file_type.is_symlink() {
+                debug!(
+                    "Ignoring symlink {} to avoid cycles",
+                    entry.path().display()
+                );
+                continue;
+            }
+
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            }
+        }
+    }
+
+    Ok(discovered)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rules::{NodeModulesRule, PythonBuildArtifactsRule, RuleEngine, RustTargetRule};
+    use anyhow::{Context, Result};
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn discover_watch_targets_skips_ignored_subtrees() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let keep_dir = temp.path().join("keep");
+        let ignored_dir = temp.path().join("node_modules");
+        let ignored_child = ignored_dir.join("deep");
+
+        fs::create_dir(&keep_dir)?;
+        fs::create_dir(&ignored_dir)?;
+        fs::create_dir(&ignored_child)?;
+
+        let engine = RuleEngine::new(vec![Box::new(NodeModulesRule)]);
+        let discovered = discover_watch_targets(temp.path(), &engine)?;
+
+        assert!(
+            discovered.watchers.contains(&temp.path().to_path_buf()),
+            "root should be watched"
+        );
+        assert!(
+            discovered.watchers.contains(&keep_dir),
+            "non matching directory should be watched"
+        );
+        assert!(
+            !discovered.watchers.contains(&ignored_dir),
+            "ignored directory should not be watched"
+        );
+        assert!(
+            !discovered.watchers.contains(&ignored_child),
+            "child of ignored directory should not be watched"
+        );
+        assert!(
+            discovered.matches.contains(&ignored_dir),
+            "ignored directory should be marked for attribute application"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn discover_watch_targets_handles_cargo_target() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let cargo_root = temp.path();
+        fs::write(cargo_root.join("Cargo.toml"), b"[package]\nname=\"demo\"")?;
+        let target_dir = cargo_root.join("target");
+        let nested_dir = target_dir.join("debug");
+        fs::create_dir(&target_dir)?;
+        fs::create_dir(&nested_dir)?;
+
+        let engine = RuleEngine::new(vec![Box::new(RustTargetRule), Box::new(NodeModulesRule)]);
+        let discovered = discover_watch_targets(cargo_root, &engine)?;
+
+        assert!(
+            discovered.matches.contains(&target_dir),
+            "target should be marked for attribute application"
+        );
+        assert!(
+            !discovered.watchers.contains(&target_dir),
+            "target directory should not be watched"
+        );
+        assert!(
+            !discovered.watchers.contains(&nested_dir),
+            "children of target directory should not be watched"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn discover_watch_targets_skips_python_envs() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let root = temp.path();
+        let venv_dir = root.join(".venv");
+        fs::create_dir(&venv_dir)?;
+
+        let engine = RuleEngine::new(vec![Box::new(PythonBuildArtifactsRule)]);
+        let discovered = discover_watch_targets(root, &engine)?;
+
+        assert!(
+            discovered.matches.contains(&venv_dir),
+            ".venv should be marked"
+        );
+        assert!(
+            !discovered.watchers.contains(&venv_dir),
+            ".venv should not be watched"
+        );
+        Ok(())
+    }
+}
