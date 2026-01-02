@@ -2,7 +2,7 @@ use crate::cli::CliArgs;
 use crate::discovery::{DiscoveredPaths, discover_watch_targets};
 use crate::dropbox::apply_dropbox_ignore;
 use crate::rules::{
-    Candidate, NodeModulesRule, PythonBuildArtifactsRule, RuleEngine, RustTargetRule,
+    Candidate, NodeModulesRule, PnpmStoreRule, PythonBuildArtifactsRule, RuleEngine, RustTargetRule,
 };
 use crate::watch::{WatchRegistry, add_watch};
 use anyhow::{Context, Result};
@@ -21,6 +21,7 @@ pub(crate) fn run(args: CliArgs) -> Result<()> {
 
     let rule_engine = RuleEngine::new(vec![
         Box::new(NodeModulesRule),
+        Box::new(PnpmStoreRule),
         Box::new(RustTargetRule),
         Box::new(PythonBuildArtifactsRule),
     ]);

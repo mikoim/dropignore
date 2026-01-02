@@ -101,6 +101,23 @@ impl Rule for NodeModulesRule {
     }
 }
 
+/// Rule that matches pnpm's content-addressable store directory `.pnpm-store`.
+pub(crate) struct PnpmStoreRule;
+
+impl Rule for PnpmStoreRule {
+    fn name(&self) -> &'static str {
+        "pnpm store directory"
+    }
+
+    fn matches(&self, candidate: &Candidate<'_>) -> bool {
+        candidate.is_dir_named(".pnpm-store")
+    }
+
+    fn action(&self) -> MatchAction {
+        MatchAction::IGNORE_AND_SKIP
+    }
+}
+
 /// Rule that matches the Rust build output directory `target` when a `Cargo.toml`
 /// exists in the same parent directory. This ensures we only ignore build artifacts
 /// for actual Cargo projects.
@@ -194,6 +211,29 @@ mod tests {
             .expect("rule should match node_modules");
 
         assert_eq!(result.name, "node_modules directory");
+        assert!(result.action.set_dropbox_ignore);
+        assert!(result.action.skip_descendants);
+        Ok(())
+    }
+
+    #[test]
+    fn pnpm_store_rule_matches_directory_name() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let target = temp.path().join(".pnpm-store");
+        fs::create_dir(&target)?;
+
+        let metadata = fs::metadata(&target)?;
+        let candidate = Candidate {
+            path: &target,
+            metadata: &metadata,
+        };
+        let engine = RuleEngine::new(vec![Box::new(PnpmStoreRule)]);
+
+        let result = engine
+            .evaluate(&candidate)
+            .expect("rule should match .pnpm-store");
+
+        assert_eq!(result.name, "pnpm store directory");
         assert!(result.action.set_dropbox_ignore);
         assert!(result.action.skip_descendants);
         Ok(())
