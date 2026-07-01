@@ -59,6 +59,17 @@ pub(crate) struct WatchRegistry {
 
 impl WatchRegistry {
     pub(crate) fn insert(&mut self, path: PathBuf, descriptor: WatchDescriptor) {
+        // inotify reuses a descriptor when a still-watched inode is renamed and
+        // re-added. Drop any prior path this descriptor mapped to so `by_path`
+        // cannot retain a stale, orphaned entry.
+        let stale_path = self
+            .by_descriptor
+            .get(&descriptor)
+            .filter(|old| *old != &path)
+            .cloned();
+        if let Some(stale_path) = stale_path {
+            self.by_path.remove(&stale_path);
+        }
         self.by_path.insert(path.clone(), descriptor.clone());
         self.by_descriptor.insert(descriptor, path);
     }
@@ -122,5 +133,26 @@ mod tests {
         let err = std::io::Error::from_raw_os_error(libc::EACCES);
         let msg = watch_error_context(Path::new("/some/dir"), &err);
         assert!(!msg.contains("max_user_watches"), "got: {msg}");
+    }
+
+    #[test]
+    fn registry_insert_evicts_stale_path_on_descriptor_reuse() -> Result<()> {
+        let temp = TempDir::new()?;
+        let inotify = Inotify::init()?;
+        let descriptor = inotify.watches().add(temp.path(), watch_mask())?;
+
+        let mut registry = WatchRegistry::default();
+        let old_path = temp.path().join("old");
+        let new_path = temp.path().join("new");
+
+        registry.insert(old_path.clone(), descriptor.clone());
+        // Same descriptor reused for a new path (as happens on rename of a
+        // still-watched inode): the old inverse mapping must not linger.
+        registry.insert(new_path.clone(), descriptor.clone());
+
+        assert!(!registry.contains_path(&old_path), "stale path must be evicted");
+        assert!(registry.contains_path(&new_path));
+        assert_eq!(registry.path_for(&descriptor), Some(&new_path));
+        Ok(())
     }
 }
