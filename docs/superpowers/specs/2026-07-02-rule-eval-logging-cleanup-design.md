@@ -96,8 +96,8 @@ duplicates the wording; rejected to keep the message DRY.
    After this, `apply_all` is used only where it earns its keep (multi-path
    apply) plus its unit test, and its return value is no longer dead.
 
-**Behavior:** the only added observable output is the rollup `warn` when 2+
-matches are applied and at least one fails.
+**Behavior:** the only added observable output is the rollup `warn`, emitted
+whenever at least one applied match fails (`failures > 0`).
 
 ## Scope / impact
 

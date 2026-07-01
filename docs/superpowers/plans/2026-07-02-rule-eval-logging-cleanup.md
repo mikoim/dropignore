@@ -12,7 +12,7 @@
 
 - No new dependencies (Cargo.toml unchanged).
 - Rust edition 2024.
-- Behavior-preserving except one added rollup `warn` line in `apply_discovered_paths` when 2+ matched paths are applied and at least one fails. Log level, wording, and firing points of the existing `info!("Matched rule ...")` line must stay identical.
+- Behavior-preserving except one added rollup `warn` line in `apply_discovered_paths`, emitted whenever at least one applied match fails (`failures > 0`). Log level, wording, and firing points of the existing `info!("Matched rule ...")` line must stay identical.
 - All existing tests must remain green; `cargo clippy` must be clean (no `dead_code`, no unused imports) after removals.
 - Follow existing style: `pub(crate)` visibility, doc comments on items, `info!`/`warn!`/`error!` macros already imported per module.
 
