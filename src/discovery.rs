@@ -29,7 +29,7 @@ pub(crate) fn discover_watch_targets(start: &Path, rules: &RuleEngine) -> Result
 
         let candidate = Candidate {
             path: &dir,
-            metadata: &metadata,
+            file_type: metadata.file_type(),
         };
 
         if let Some(matched) = rules.evaluate(&candidate) {
@@ -83,6 +83,23 @@ pub(crate) fn discover_watch_targets(start: &Path, rules: &RuleEngine) -> Result
 
             if file_type.is_dir() {
                 stack.push(entry.path());
+                continue;
+            }
+
+            // Non-directory entry: evaluate now so files like *.egg-info that
+            // already exist at startup are marked, mirroring the runtime path
+            // in `plan_entry`. Files have no descendants, so `skip_descendants`
+            // is irrelevant here.
+            let path = entry.path();
+            let candidate = Candidate {
+                path: &path,
+                file_type,
+            };
+            if let Some(matched) = rules.evaluate(&candidate) {
+                matched.log_matched(&path);
+                if matched.action.set_dropbox_ignore {
+                    discovered.matches.push(path);
+                }
             }
         }
     }
@@ -180,6 +197,30 @@ mod tests {
         assert!(
             !discovered.watchers.contains(&venv_dir),
             ".venv should not be watched"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn discover_watch_targets_marks_egg_info_files() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let top = temp.path().join("pkg.egg-info");
+        let sub = temp.path().join("sub");
+        let nested = sub.join("inner.egg-info");
+        fs::create_dir(&sub)?;
+        fs::write(&top, b"")?;
+        fs::write(&nested, b"")?;
+
+        let engine = RuleEngine::new(vec![Box::new(PythonBuildArtifactsRule)]);
+        let discovered = discover_watch_targets(temp.path(), &engine)?;
+
+        assert!(
+            discovered.matches.contains(&top),
+            "top-level *.egg-info file must be marked"
+        );
+        assert!(
+            discovered.matches.contains(&nested),
+            "nested *.egg-info file must be marked"
         );
         Ok(())
     }

@@ -36,7 +36,14 @@ The two gaps:
 ## Non-goals (YAGNI)
 
 - Scoped subtree rebuild / `WatchRegistry::drain_subtree` (B-scoped). Deferred
-  until measurement shows the whole-tree rescan is too costly.
+  until measurement shows the whole-tree rescan is too costly. Concrete signal
+  to revisit: editors that save a trigger file via write-temp-then-rename emit
+  `IN_MOVED_TO` with the trigger name, so each save of a watched project's
+  `Cargo.toml` fires a full-tree `rebuild_watches`. For an actively edited
+  project inside a large Dropbox tree this exceeds the "low trigger frequency"
+  assumption and routinely exercises the teardown-before-reseed window, which a
+  scoped rebuild would confine to the affected subtree. (Plain `MODIFY` churn
+  does not trigger — the check is under the `CREATE || MOVED_TO` guard.)
 - Config-file-driven rules.
 - Signal handling / systemd integration.
 - Cross-platform (macOS) support.

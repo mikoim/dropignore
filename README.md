@@ -22,10 +22,10 @@ RUST_LOG=debug cargo run -- --dry-run /home/foo/Dropbox
 ```
 
 ## How it works
-1. Seeds watches for all traversable subdirectories under the root, skipping any directory matched by a rule.
+1. Seeds watches for all traversable subdirectories under the root, skipping any directory matched by a rule, and marks any rule-matching file or directory that already exists (e.g. a pre-existing `*.egg-info`).
 2. Applies `user.com.dropbox.ignored=1` to any matched path (or logs in dry-run).
 3. Listens for create/move-in events and processes new paths, adding watches for newly discovered directories unless a rule says to skip descendants.
-4. Skips symlinks (matching the initial walk) and, if the inotify event queue overflows, re-scans from the root so dropped events cannot leave paths unmarked.
+4. Skips symlinks (matching the initial walk) and, if the inotify event queue overflows, re-scans from the root so dropped events cannot leave paths unmarked. Creating a rule's dependency file (e.g. a `Cargo.toml` next to an existing `target`) also triggers a re-scan so order-dependent rules are reconciled without a restart.
 
 ## Testing
 ```bash
