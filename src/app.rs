@@ -128,6 +128,20 @@ fn event_loop(
                 }
             };
 
+            // A dependency file (e.g. Cargo.toml) can flip an order-dependent
+            // rule's verdict for a sibling that already exists and is watched.
+            // Reuse the overflow rescan path to reconcile the whole tree; the
+            // check runs before the metadata read so a transient stat failure on
+            // the trigger file still schedules the rescan.
+            if rule_engine.is_trigger(name) {
+                info!(
+                    "Trigger file {} created; rescanning {} to reconcile dependent rules",
+                    parent_dir.join(name).display(),
+                    root.display()
+                );
+                needs_rescan = true;
+            }
+
             let full_path = parent_dir.join(name);
             let metadata = match fs::symlink_metadata(&full_path) {
                 Ok(m) => m,
