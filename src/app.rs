@@ -102,7 +102,11 @@ fn event_loop(
 
             if let Some(action) = rule_engine.evaluate_action(&candidate) {
                 if action.set_dropbox_ignore {
-                    apply_dropbox_ignore(&full_path, dry_run)?;
+                    // Continue past a failure here too; errors are already logged
+                    // by apply_dropbox_ignore.
+                    apply_all(std::slice::from_ref(&full_path), |path| {
+                        apply_dropbox_ignore(path, dry_run)
+                    });
                 }
 
                 if action.skip_descendants && candidate.is_dir() {
@@ -135,6 +139,22 @@ fn event_loop(
     }
 }
 
+/// Apply `apply` to every path, continuing past individual failures, and
+/// return how many failed. Callees are expected to log their own errors
+/// (see `apply_dropbox_ignore`), so this helper stays silent.
+fn apply_all<F>(paths: &[PathBuf], mut apply: F) -> usize
+where
+    F: FnMut(&Path) -> Result<()>,
+{
+    let mut failures = 0;
+    for path in paths {
+        if apply(path).is_err() {
+            failures += 1;
+        }
+    }
+    failures
+}
+
 /// Ensure the path exists and is a directory.
 fn ensure_directory(path: &Path) -> Result<()> {
     let metadata = fs::metadata(path)
@@ -151,13 +171,39 @@ fn apply_discovered_paths(
     watcher: &mut Inotify,
     registry: &mut WatchRegistry,
 ) -> Result<()> {
-    for matched in discovered.matches {
-        apply_dropbox_ignore(&matched, dry_run)?;
-    }
+    // Apply to every match, continuing past individual failures so one bad
+    // path cannot terminate the watcher.
+    apply_all(&discovered.matches, |path| apply_dropbox_ignore(path, dry_run));
 
     for directory in discovered.watchers {
         add_watch(watcher, registry, &directory)?;
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn apply_all_visits_every_path_despite_failures() {
+        let paths = vec![
+            PathBuf::from("a"),
+            PathBuf::from("b"),
+            PathBuf::from("c"),
+        ];
+        let mut seen = Vec::new();
+        let failures = apply_all(&paths, |p| {
+            seen.push(p.to_path_buf());
+            if p == Path::new("b") {
+                anyhow::bail!("boom");
+            }
+            Ok(())
+        });
+
+        assert_eq!(failures, 1, "the single failing path should be counted");
+        assert_eq!(seen, paths, "every path must be visited even after a failure");
+    }
 }
