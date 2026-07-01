@@ -224,4 +224,30 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn discover_watch_targets_skips_pycache_subtree() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let cache = temp.path().join("__pycache__");
+        let nested = cache.join("sub");
+        fs::create_dir(&cache)?;
+        fs::create_dir(&nested)?;
+
+        let engine = RuleEngine::new(vec![Box::new(PythonBuildArtifactsRule)]);
+        let discovered = discover_watch_targets(temp.path(), &engine)?;
+
+        assert!(
+            discovered.matches.contains(&cache),
+            "__pycache__ must be marked"
+        );
+        assert!(
+            !discovered.watchers.contains(&cache),
+            "__pycache__ must not be watched"
+        );
+        assert!(
+            !discovered.watchers.contains(&nested),
+            "__pycache__ child must not be watched"
+        );
+        Ok(())
+    }
 }
