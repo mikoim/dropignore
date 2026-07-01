@@ -614,10 +614,13 @@ mod tests {
         assert!(registry.contains_path(&root), "root must be watched after seeding");
 
         // Create entries *after* watching so they arrive through the event path.
+        // node_modules is created first so its CREATE event is drained no later
+        // than plain's, making the "not watched" assertion below meaningful
+        // rather than trivially true because it was never evaluated.
         let plain = root.join("plain");
         let nm = root.join("node_modules");
-        fs::create_dir(&plain)?;
         fs::create_dir(&nm)?;
+        fs::create_dir(&plain)?;
 
         // Drain until the registry reflects the creations or the deadline passes.
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -639,8 +642,6 @@ mod tests {
 
     #[test]
     fn event_loop_stops_when_shutdown_flag_is_set() -> Result<()> {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::thread;
         use std::time::{Duration, Instant};
 
