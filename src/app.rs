@@ -10,6 +10,8 @@ use anyhow::{Context, Result};
 use inotify::{EventMask, Inotify};
 use log::{debug, info, warn};
 use std::fs;
+use std::io::ErrorKind;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::collections::HashSet;
 
@@ -68,7 +70,49 @@ fn plan_entry(candidate: &Candidate<'_>, rules: &RuleEngine) -> EntryAction {
     }
 }
 
-/// Main blocking loop that reads inotify events and reacts to creations/moves.
+/// Worst-case latency between a shutdown request and the loop noticing it.
+const POLL_TIMEOUT_MS: i32 = 500;
+
+/// Result of waiting on the inotify fd.
+enum PollResult {
+    /// The fd has events queued and is ready to read.
+    Readable,
+    /// The poll timed out; no events arrived within the window.
+    TimedOut,
+    /// A signal interrupted the wait (EINTR); the caller should re-check its
+    /// shutdown flag and poll again.
+    Interrupted,
+}
+
+/// Wait up to `timeout_ms` for the inotify fd to become readable. The timeout
+/// guarantees the caller regains control periodically, so shutdown never depends
+/// on a signal interrupting the wait.
+fn poll_inotify(fd: RawFd, timeout_ms: i32) -> Result<PollResult> {
+    let mut pollfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `pollfd` is a single valid, fully initialized `pollfd` that lives
+    // for the whole call; we pass a count of 1 to match.
+    let ret = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
+    match ret {
+        -1 => {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                Ok(PollResult::Interrupted)
+            } else {
+                Err(anyhow::Error::new(err).context("poll on inotify fd failed"))
+            }
+        }
+        0 => Ok(PollResult::TimedOut),
+        _ => Ok(PollResult::Readable),
+    }
+}
+
+/// Main blocking loop that waits for inotify events and reacts to
+/// creations/moves. Runs until the process is killed (shutdown gating is added
+/// in a later change).
 fn event_loop(
     root: PathBuf,
     dry_run: bool,
@@ -76,135 +120,159 @@ fn event_loop(
     mut registry: WatchRegistry,
     rule_engine: RuleEngine,
 ) -> Result<()> {
-    let mut buffer = [0u8; 4096];
-
+    let fd = watcher.as_raw_fd();
     loop {
-        let events = watcher
-            .read_events_blocking(&mut buffer)
-            .context("Failed to read inotify events")?;
-
-        // Collect new directories to process after the borrow from `events` ends,
-        // which keeps the borrow checker happy while allowing new watches to be added.
-        let mut pending_directories: Vec<PathBuf> = Vec::new();
-        let mut needs_rescan = false;
-        // Distinct subtrees to rescan because a rule trigger file appeared in
-        // them. Deduplicated so repeated triggers in one batch rescan once.
-        let mut rescan_scopes: HashSet<PathBuf> = HashSet::new();
-
-        for event in events {
-            // A queue overflow means the kernel dropped events; the descriptor
-            // and name are invalid, so handle it before any lookup. Collapse
-            // multiple overflows in one batch into a single re-scan.
-            if event.mask.contains(EventMask::Q_OVERFLOW) {
-                warn!(
-                    "inotify queue overflowed; events were dropped, will rescan {}",
-                    root.display()
-                );
-                needs_rescan = true;
-                continue;
-            }
-
-            // Remove bookkeeping for directories that disappeared or were moved,
-            // so stale mappings can't resolve later events to the wrong path.
-            if event.mask.contains(EventMask::DELETE_SELF)
-                || event.mask.contains(EventMask::MOVE_SELF)
-            {
-                registry.remove_by_descriptor(&event.wd);
-                continue;
-            }
-
-            if !(event.mask.contains(EventMask::CREATE) || event.mask.contains(EventMask::MOVED_TO))
-            {
-                continue;
-            }
-
-            let parent_dir = match registry.path_for(&event.wd) {
-                Some(path) => path,
-                None => {
-                    warn!("Received event for unknown watch descriptor {:?}", event.wd);
-                    continue;
-                }
-            };
-
-            let name = match &event.name {
-                Some(name) => name,
-                None => {
-                    debug!("Ignored event without a name in {}", parent_dir.display());
-                    continue;
-                }
-            };
-
-            // A dependency file (e.g. Cargo.toml) can flip an order-dependent
-            // rule's verdict for a sibling that already exists and is watched.
-            // Reuse the overflow rescan path to reconcile the whole tree; the
-            // check runs before the metadata read so a transient stat failure on
-            // the trigger file still schedules the rescan.
-            if rule_engine.is_trigger(name) {
-                info!(
-                    "Trigger file {} created; rescanning {} to reconcile dependent rules",
-                    parent_dir.join(name).display(),
-                    parent_dir.display()
-                );
-                rescan_scopes.insert(parent_dir.to_path_buf());
-            }
-
-            let full_path = parent_dir.join(name);
-            let metadata = match fs::symlink_metadata(&full_path) {
-                Ok(m) => m,
-                Err(err) => {
-                    warn!(
-                        "Skipping {} because metadata could not be read: {err}",
-                        full_path.display()
-                    );
-                    continue;
-                }
-            };
-
-            let candidate = Candidate {
-                path: &full_path,
-                file_type: metadata.file_type(),
-            };
-
-            let action = plan_entry(&candidate, &rule_engine);
-
-            if action.apply_ignore {
-                // Failure is already logged at error! by apply_dropbox_ignore;
-                // the loop continues to the next event regardless.
-                let _ = apply_dropbox_ignore(&full_path, dry_run);
-            }
-
-            if action.watch_dir {
-                pending_directories.push(full_path);
-            }
-        }
-
-        // Process newly discovered directories once the event iterator is dropped so
-        // inotify can be borrowed mutably again.
-        for directory in pending_directories {
-            let discovered = match discover_watch_targets(&directory, &rule_engine) {
-                Ok(d) => d,
-                Err(err) => {
-                    warn!(
-                        "Failed to walk {} for watch seeding: {err}",
-                        directory.display()
-                    );
-                    continue;
-                }
-            };
-
-            apply_discovered_paths(discovered, dry_run, &mut watcher, &mut registry)?;
-        }
-
-        if needs_rescan {
-            // Overflow dropped events: no descriptor is trustworthy, so rebuild
-            // the whole tree. This supersedes any recorded scopes (all under root).
-            rescan_subtree(&root, dry_run, &mut watcher, &mut registry, &rule_engine)?;
-        } else {
-            for scope in &rescan_scopes {
-                rescan_subtree(scope, dry_run, &mut watcher, &mut registry, &rule_engine)?;
+        match poll_inotify(fd, POLL_TIMEOUT_MS)? {
+            PollResult::Interrupted | PollResult::TimedOut => continue,
+            PollResult::Readable => {
+                drain_events(&mut watcher, &mut registry, &rule_engine, &root, dry_run)?
             }
         }
     }
+}
+
+/// Read one buffer's worth of inotify events (non-blocking) and apply all
+/// per-event handling: mark matches, seed watches for new directories, and run
+/// scoped or whole-tree rescans. Returns `Ok(())` when no events are queued.
+fn drain_events(
+    watcher: &mut Inotify,
+    registry: &mut WatchRegistry,
+    rule_engine: &RuleEngine,
+    root: &Path,
+    dry_run: bool,
+) -> Result<()> {
+    let mut buffer = [0u8; 4096];
+    let events = match watcher.read_events(&mut buffer) {
+        Ok(events) => events,
+        // The fd is non-blocking; an empty queue is the normal terminator.
+        Err(err) if err.kind() == ErrorKind::WouldBlock => return Ok(()),
+        Err(err) => {
+            return Err(anyhow::Error::new(err).context("Failed to read inotify events"));
+        }
+    };
+
+    // Collect new directories to process after the borrow from `events` ends,
+    // which keeps the borrow checker happy while allowing new watches to be added.
+    let mut pending_directories: Vec<PathBuf> = Vec::new();
+    let mut needs_rescan = false;
+    // Distinct subtrees to rescan because a rule trigger file appeared in
+    // them. Deduplicated so repeated triggers in one batch rescan once.
+    let mut rescan_scopes: HashSet<PathBuf> = HashSet::new();
+
+    for event in events {
+        // A queue overflow means the kernel dropped events; the descriptor
+        // and name are invalid, so handle it before any lookup. Collapse
+        // multiple overflows in one batch into a single re-scan.
+        if event.mask.contains(EventMask::Q_OVERFLOW) {
+            warn!(
+                "inotify queue overflowed; events were dropped, will rescan {}",
+                root.display()
+            );
+            needs_rescan = true;
+            continue;
+        }
+
+        // Remove bookkeeping for directories that disappeared or were moved,
+        // so stale mappings can't resolve later events to the wrong path.
+        if event.mask.contains(EventMask::DELETE_SELF)
+            || event.mask.contains(EventMask::MOVE_SELF)
+        {
+            registry.remove_by_descriptor(&event.wd);
+            continue;
+        }
+
+        if !(event.mask.contains(EventMask::CREATE) || event.mask.contains(EventMask::MOVED_TO)) {
+            continue;
+        }
+
+        let parent_dir = match registry.path_for(&event.wd) {
+            Some(path) => path,
+            None => {
+                warn!("Received event for unknown watch descriptor {:?}", event.wd);
+                continue;
+            }
+        };
+
+        let name = match &event.name {
+            Some(name) => name,
+            None => {
+                debug!("Ignored event without a name in {}", parent_dir.display());
+                continue;
+            }
+        };
+
+        // A dependency file (e.g. Cargo.toml) can flip an order-dependent
+        // rule's verdict for a sibling that already exists and is watched.
+        // Reuse the overflow rescan path to reconcile the whole tree; the
+        // check runs before the metadata read so a transient stat failure on
+        // the trigger file still schedules the rescan.
+        if rule_engine.is_trigger(name) {
+            info!(
+                "Trigger file {} created; rescanning {} to reconcile dependent rules",
+                parent_dir.join(name).display(),
+                parent_dir.display()
+            );
+            rescan_scopes.insert(parent_dir.to_path_buf());
+        }
+
+        let full_path = parent_dir.join(name);
+        let metadata = match fs::symlink_metadata(&full_path) {
+            Ok(m) => m,
+            Err(err) => {
+                warn!(
+                    "Skipping {} because metadata could not be read: {err}",
+                    full_path.display()
+                );
+                continue;
+            }
+        };
+
+        let candidate = Candidate {
+            path: &full_path,
+            file_type: metadata.file_type(),
+        };
+
+        let action = plan_entry(&candidate, rule_engine);
+
+        if action.apply_ignore {
+            // Failure is already logged at error! by apply_dropbox_ignore;
+            // the loop continues to the next event regardless.
+            let _ = apply_dropbox_ignore(&full_path, dry_run);
+        }
+
+        if action.watch_dir {
+            pending_directories.push(full_path);
+        }
+    }
+
+    // Process newly discovered directories once the event iterator is dropped so
+    // inotify can be borrowed mutably again.
+    for directory in pending_directories {
+        let discovered = match discover_watch_targets(&directory, rule_engine) {
+            Ok(d) => d,
+            Err(err) => {
+                warn!(
+                    "Failed to walk {} for watch seeding: {err}",
+                    directory.display()
+                );
+                continue;
+            }
+        };
+
+        apply_discovered_paths(discovered, dry_run, watcher, registry)?;
+    }
+
+    if needs_rescan {
+        // Overflow dropped events: no descriptor is trustworthy, so rebuild
+        // the whole tree. This supersedes any recorded scopes (all under root).
+        rescan_subtree(root, dry_run, watcher, registry, rule_engine)?;
+    } else {
+        for scope in &rescan_scopes {
+            rescan_subtree(scope, dry_run, watcher, registry, rule_engine)?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Apply `apply` to every path, continuing past individual failures, and
@@ -507,6 +575,47 @@ mod tests {
         assert!(registry.contains_path(&a_inner), "in-scope descendant re-added");
         assert!(registry.contains_path(&proj_b), "out-of-scope project untouched");
         assert!(registry.contains_path(&b_inner), "out-of-scope descendant untouched");
+        Ok(())
+    }
+
+    #[test]
+    fn drain_events_registers_new_dir_and_skips_ignored() -> Result<()> {
+        use std::thread::sleep;
+        use std::time::{Duration, Instant};
+
+        let temp = TempDir::new()?;
+        let root = temp.path().to_path_buf();
+        let rules = engine(); // NodeModulesRule only
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+
+        // Seed watches for the existing (empty) tree so `root` is watched and can
+        // deliver CREATE events for children made below.
+        let initial = discover_watch_targets(&root, &rules)?;
+        apply_discovered_paths(initial, true, &mut watcher, &mut registry)?;
+        assert!(registry.contains_path(&root), "root must be watched after seeding");
+
+        // Create entries *after* watching so they arrive through the event path.
+        let plain = root.join("plain");
+        let nm = root.join("node_modules");
+        fs::create_dir(&plain)?;
+        fs::create_dir(&nm)?;
+
+        // Drain until the registry reflects the creations or the deadline passes.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !registry.contains_path(&plain) {
+            drain_events(&mut watcher, &mut registry, &rules, &root, true)?;
+            sleep(Duration::from_millis(20));
+        }
+
+        assert!(
+            registry.contains_path(&plain),
+            "a new plain dir must be watched via the event path"
+        );
+        assert!(
+            !registry.contains_path(&nm),
+            "node_modules must be skipped (matched), not watched"
+        );
         Ok(())
     }
 
