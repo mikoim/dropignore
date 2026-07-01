@@ -180,6 +180,19 @@ impl Rule for RustTargetRule {
     }
 }
 
+/// Reproducible Python environment and tool-cache directories matched by exact
+/// name. Each is tool-owned and never contains user source, so it is safe to
+/// mark and skip. Verified against Ruff's default `exclude` list.
+const PYTHON_ARTIFACT_DIRS: &[&str] = &[
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+];
+
 /// Rule that captures large, reproducible Python build or cache artifacts typically
 /// found in uv-managed projects. These are safe to ignore in Dropbox sync to reduce
 /// noise and storage churn.
@@ -195,11 +208,10 @@ impl Rule for PythonBuildArtifactsRule {
             return false;
         };
 
-        let is_dir = candidate.is_dir();
         let name = file_name.to_string_lossy();
 
-        // Virtual environments (uv default is .venv) and common aliases.
-        if is_dir && (name == ".venv" || name == "venv") {
+        // Reproducible environment/cache directories matched by exact name.
+        if candidate.is_dir() && PYTHON_ARTIFACT_DIRS.contains(&name.as_ref()) {
             return true;
         }
 
@@ -215,6 +227,35 @@ impl Rule for PythonBuildArtifactsRule {
     fn action(&self) -> MatchAction {
         // Directories should not be traversed; files have no descendants,
         // so this flag is fine to leave true for both cases.
+        MatchAction::IGNORE_AND_SKIP
+    }
+}
+
+/// JavaScript framework build output and tool cache directories matched by
+/// exact name. Each is reproducible and never holds user source. `.turbo` is
+/// Turborepo's local cache (verified against its docs).
+const JS_ARTIFACT_DIRS: &[&str] = &[".next", ".nuxt", ".turbo", ".parcel-cache"];
+
+/// Rule that matches JavaScript build/cache directories by exact name.
+pub(crate) struct JsBuildArtifactsRule;
+
+impl Rule for JsBuildArtifactsRule {
+    fn name(&self) -> &'static str {
+        "JavaScript build/cache directory"
+    }
+
+    fn matches(&self, candidate: &Candidate<'_>) -> bool {
+        if !candidate.is_dir() {
+            return false;
+        }
+        candidate
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| JS_ARTIFACT_DIRS.contains(&name))
+    }
+
+    fn action(&self) -> MatchAction {
         MatchAction::IGNORE_AND_SKIP
     }
 }
@@ -347,5 +388,89 @@ mod tests {
     fn rule_engine_without_target_rule_has_no_triggers() {
         let engine = RuleEngine::new(vec![Box::new(NodeModulesRule)]);
         assert!(!engine.is_trigger(OsStr::new("Cargo.toml")));
+    }
+
+    #[test]
+    fn python_artifact_rule_matches_tool_caches() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let engine = RuleEngine::new(vec![Box::new(PythonBuildArtifactsRule)]);
+
+        for name in [
+            "__pycache__",
+            ".pytest_cache",
+            ".mypy_cache",
+            ".ruff_cache",
+            ".tox",
+        ] {
+            let dir = temp.path().join(name);
+            fs::create_dir(&dir)?;
+            let meta = fs::metadata(&dir)?;
+            let candidate = Candidate {
+                path: &dir,
+                file_type: meta.file_type(),
+            };
+            let result = engine
+                .evaluate(&candidate)
+                .unwrap_or_else(|| panic!("{name} should match"));
+            assert!(result.action.set_dropbox_ignore, "{name} must be marked");
+            assert!(result.action.skip_descendants, "{name} must skip descendants");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn python_artifact_rule_ignores_ordinary_directory() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let dir = temp.path().join("src");
+        fs::create_dir(&dir)?;
+        let meta = fs::metadata(&dir)?;
+        let candidate = Candidate {
+            path: &dir,
+            file_type: meta.file_type(),
+        };
+        let engine = RuleEngine::new(vec![Box::new(PythonBuildArtifactsRule)]);
+        assert!(engine.evaluate(&candidate).is_none(), "src must not match");
+        Ok(())
+    }
+
+    #[test]
+    fn js_build_artifacts_rule_matches_framework_dirs() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let engine = RuleEngine::new(vec![Box::new(JsBuildArtifactsRule)]);
+
+        for name in [".next", ".nuxt", ".turbo", ".parcel-cache"] {
+            let dir = temp.path().join(name);
+            fs::create_dir(&dir)?;
+            let meta = fs::metadata(&dir)?;
+            let candidate = Candidate {
+                path: &dir,
+                file_type: meta.file_type(),
+            };
+            let result = engine
+                .evaluate(&candidate)
+                .unwrap_or_else(|| panic!("{name} should match"));
+            assert_eq!(result.name, "JavaScript build/cache directory");
+            assert!(result.action.set_dropbox_ignore, "{name} must be marked");
+            assert!(result.action.skip_descendants, "{name} must skip descendants");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn js_build_artifacts_rule_ignores_file_named_like_dir() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let file = temp.path().join(".turbo");
+        fs::write(&file, b"")?;
+        let meta = fs::metadata(&file)?;
+        let candidate = Candidate {
+            path: &file,
+            file_type: meta.file_type(),
+        };
+        let engine = RuleEngine::new(vec![Box::new(JsBuildArtifactsRule)]);
+        assert!(
+            engine.evaluate(&candidate).is_none(),
+            "a regular file named .turbo must not match"
+        );
+        Ok(())
     }
 }

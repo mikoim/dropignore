@@ -4,7 +4,7 @@ CLI tool that watches a directory with inotify and marks matching paths with Dro
 
 ## Features
 - Recursive watch starting at a user-specified root, using dynamic inotify registrations.
-- Rule-based matching (currently: `node_modules`, pnpm `.pnpm-store`, Cargo `target` with adjacent `Cargo.toml`, Python virtualenvs `venv`/`.venv`, and `*.egg-info`).
+- Rule-based matching (currently: `node_modules`, pnpm `.pnpm-store`, Cargo `target` with adjacent `Cargo.toml`, Python virtualenvs `venv`/`.venv`, `*.egg-info`, Python tool caches `__pycache__`/`.pytest_cache`/`.mypy_cache`/`.ruff_cache`/`.tox`, and JS build/cache dirs `.next`/`.nuxt`/`.turbo`/`.parcel-cache`).
 - Skips descending into ignored subtrees to avoid unnecessary watches.
 - Dry-run mode logs intended actions without calling `setxattr`.
 - Detailed logging via `env_logger`.
