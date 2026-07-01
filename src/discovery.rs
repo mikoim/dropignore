@@ -29,7 +29,7 @@ pub(crate) fn discover_watch_targets(start: &Path, rules: &RuleEngine) -> Result
 
         let candidate = Candidate {
             path: &dir,
-            metadata: &metadata,
+            file_type: metadata.file_type(),
         };
 
         if let Some(matched) = rules.evaluate(&candidate) {

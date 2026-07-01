@@ -142,7 +142,7 @@ fn event_loop(
 
             let candidate = Candidate {
                 path: &full_path,
-                metadata: &metadata,
+                file_type: metadata.file_type(),
             };
 
             let action = plan_entry(&candidate, &rule_engine);
@@ -287,7 +287,7 @@ mod tests {
         symlink(&real_dir, &link)?;
 
         let metadata = fs::symlink_metadata(&link)?;
-        let candidate = Candidate { path: &link, metadata: &metadata };
+        let candidate = Candidate { path: &link, file_type: metadata.file_type() };
         let action = plan_entry(&candidate, &engine());
 
         assert!(!action.apply_ignore, "symlink must not be marked");
@@ -302,7 +302,7 @@ mod tests {
         fs::create_dir(&dir)?;
 
         let metadata = fs::symlink_metadata(&dir)?;
-        let candidate = Candidate { path: &dir, metadata: &metadata };
+        let candidate = Candidate { path: &dir, file_type: metadata.file_type() };
         let action = plan_entry(&candidate, &engine());
 
         assert!(!action.apply_ignore);
@@ -317,7 +317,7 @@ mod tests {
         fs::create_dir(&dir)?;
 
         let metadata = fs::symlink_metadata(&dir)?;
-        let candidate = Candidate { path: &dir, metadata: &metadata };
+        let candidate = Candidate { path: &dir, file_type: metadata.file_type() };
         let action = plan_entry(&candidate, &engine());
 
         assert!(action.apply_ignore, "node_modules must be marked");
@@ -427,7 +427,7 @@ mod tests {
         let metadata = fs::symlink_metadata(&egg)?;
         let candidate = Candidate {
             path: &egg,
-            metadata: &metadata,
+            file_type: metadata.file_type(),
         };
         let rules = RuleEngine::new(vec![Box::new(PythonBuildArtifactsRule)]);
         let action = plan_entry(&candidate, &rules);

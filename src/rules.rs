@@ -6,16 +6,16 @@ use std::path::Path;
 #[derive(Debug)]
 pub(crate) struct Candidate<'a> {
     pub(crate) path: &'a Path,
-    pub(crate) metadata: &'a fs::Metadata,
+    pub(crate) file_type: fs::FileType,
 }
 
 impl Candidate<'_> {
     pub(crate) fn is_dir(&self) -> bool {
-        self.metadata.is_dir()
+        self.file_type.is_dir()
     }
 
     pub(crate) fn is_symlink(&self) -> bool {
-        self.metadata.file_type().is_symlink()
+        self.file_type.is_symlink()
     }
 
     pub(crate) fn is_dir_named(&self, name: &str) -> bool {
@@ -204,7 +204,7 @@ mod tests {
         let metadata = fs::metadata(&target)?;
         let candidate = Candidate {
             path: &target,
-            metadata: &metadata,
+            file_type: metadata.file_type(),
         };
         let engine = RuleEngine::new(vec![Box::new(NodeModulesRule)]);
 
@@ -227,7 +227,7 @@ mod tests {
         let metadata = fs::metadata(&target)?;
         let candidate = Candidate {
             path: &target,
-            metadata: &metadata,
+            file_type: metadata.file_type(),
         };
         let engine = RuleEngine::new(vec![Box::new(PnpmStoreRule)]);
 
@@ -254,7 +254,7 @@ mod tests {
         let metadata = fs::metadata(&target_dir)?;
         let candidate = Candidate {
             path: &target_dir,
-            metadata: &metadata,
+            file_type: metadata.file_type(),
         };
         let engine = RuleEngine::new(vec![Box::new(RustTargetRule), Box::new(NodeModulesRule)]);
 
@@ -282,7 +282,7 @@ mod tests {
         let venv_meta = fs::metadata(&venv_dir)?;
         let venv_candidate = Candidate {
             path: &venv_dir,
-            metadata: &venv_meta,
+            file_type: venv_meta.file_type(),
         };
         assert!(
             engine.evaluate(&venv_candidate).is_some(),
@@ -292,7 +292,7 @@ mod tests {
         let egg_meta = fs::metadata(&egg_info_dir)?;
         let egg_candidate = Candidate {
             path: &egg_info_dir,
-            metadata: &egg_meta,
+            file_type: egg_meta.file_type(),
         };
         assert!(
             engine.evaluate(&egg_candidate).is_some(),
