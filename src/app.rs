@@ -177,14 +177,7 @@ fn event_loop(
         }
 
         if needs_rescan {
-            match discover_watch_targets(&root, &rule_engine) {
-                Ok(discovered) => {
-                    apply_discovered_paths(discovered, dry_run, &mut watcher, &mut registry)?;
-                }
-                Err(err) => {
-                    warn!("Rescan after overflow failed for {}: {err}", root.display());
-                }
-            }
+            rebuild_watches(&root, dry_run, &mut watcher, &mut registry, &rule_engine)?;
         }
     }
 }
@@ -232,13 +225,38 @@ fn apply_discovered_paths(
     Ok(())
 }
 
+/// Tear down every held watch and rebuild the watch set from the current tree.
+/// Used after a queue overflow, when dropped events mean no existing descriptor
+/// can be trusted (a directory may have been deleted, or deleted and recreated
+/// under the same name as a fresh inode).
+fn rebuild_watches(
+    root: &Path,
+    dry_run: bool,
+    watcher: &mut Inotify,
+    registry: &mut WatchRegistry,
+    rules: &RuleEngine,
+) -> Result<()> {
+    for descriptor in registry.drain_descriptors() {
+        // EINVAL means the kernel already dropped this watch (inode gone);
+        // nothing else is actionable, so ignore the result.
+        let _ = watcher.watches().remove(descriptor);
+    }
+    match discover_watch_targets(root, rules) {
+        Ok(discovered) => apply_discovered_paths(discovered, dry_run, watcher, registry),
+        Err(err) => {
+            warn!("Rescan after overflow failed for {}: {err}", root.display());
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use anyhow::Result;
     use crate::discovery::discover_watch_targets;
     use crate::rules::{Candidate, NodeModulesRule};
-    use crate::watch::WatchRegistry;
+    use crate::watch::{WatchRegistry, watch_mask};
     use inotify::Inotify;
     use std::os::unix::fs::symlink;
     use std::path::Path;
@@ -338,6 +356,53 @@ mod tests {
 
         assert_eq!(after_first, after_second, "re-scan must not add duplicate watches");
         assert!(after_first >= 3, "root + a + a/b should be watched, node_modules skipped");
+        Ok(())
+    }
+
+    #[test]
+    fn rebuild_watches_reconciles_stale_entries() -> Result<()> {
+        let temp = TempDir::new()?;
+        fs::create_dir(temp.path().join("a"))?;
+        fs::create_dir(temp.path().join("a").join("b"))?;
+
+        let rules = engine();
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+
+        // Seed watches from the real tree.
+        let discovered = discover_watch_targets(temp.path(), &rules)?;
+        apply_discovered_paths(discovered, true, &mut watcher, &mut registry)?;
+
+        // Inject a stale entry for a path that no longer exists, modelling a
+        // deleted (or deleted-then-recreated) intermediate whose old
+        // bookkeeping lingers. Use a descriptor from a separate directory so it
+        // does not collide with any tree descriptor, and so drain's kernel
+        // removal has a valid descriptor to call.
+        let other = TempDir::new()?;
+        let ghost_wd = watcher.watches().add(other.path(), watch_mask())?;
+        let ghost = temp.path().join("ghost");
+        registry.insert(ghost.clone(), ghost_wd);
+        assert!(registry.contains_path(&ghost), "stale entry seeded");
+
+        rebuild_watches(temp.path(), true, &mut watcher, &mut registry, &rules)?;
+
+        assert!(!registry.contains_path(&ghost), "stale entry must be pruned");
+        assert!(registry.contains_path(temp.path()), "root must be re-watched");
+        assert!(
+            registry.contains_path(&temp.path().join("a")),
+            "a must be re-watched"
+        );
+        assert!(
+            registry.contains_path(&temp.path().join("a").join("b")),
+            "a/b must be re-watched"
+        );
+
+        let fresh = discover_watch_targets(temp.path(), &rules)?;
+        assert_eq!(
+            registry.watched_count(),
+            fresh.watchers.len(),
+            "registry must match a fresh discovery exactly"
+        );
         Ok(())
     }
 }
