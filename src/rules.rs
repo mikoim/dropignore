@@ -1,4 +1,6 @@
 use log::info;
+use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
 
@@ -60,16 +62,33 @@ pub(crate) trait Rule: Send + Sync {
     fn matches(&self, candidate: &Candidate<'_>) -> bool;
     /// Behavior to apply when the rule matches.
     fn action(&self) -> MatchAction;
+    /// Filenames whose creation may change this rule's verdict for a sibling.
+    /// Creating any of these under a watched directory schedules a rescan.
+    fn triggers(&self) -> &'static [&'static str] {
+        &[]
+    }
 }
 
 /// Simple rule engine that evaluates candidates against registered rules.
 pub(crate) struct RuleEngine {
     rules: Vec<Box<dyn Rule>>,
+    triggers: HashSet<&'static str>,
 }
 
 impl RuleEngine {
     pub(crate) fn new(rules: Vec<Box<dyn Rule>>) -> Self {
-        Self { rules }
+        let triggers = rules
+            .iter()
+            .flat_map(|rule| rule.triggers().iter().copied())
+            .collect();
+        Self { rules, triggers }
+    }
+
+    /// True when `name` is a dependency filename declared by some rule. A
+    /// created entry with this name should schedule a rescan so order-dependent
+    /// rules (e.g. Cargo `target`) are reconciled. Non-UTF-8 names never match.
+    pub(crate) fn is_trigger(&self, name: &OsStr) -> bool {
+        name.to_str().is_some_and(|name| self.triggers.contains(name))
     }
 
     /// Returns the first matching rule. The ordering in `rules` defines priority.
@@ -147,6 +166,10 @@ impl Rule for RustTargetRule {
 
     fn action(&self) -> MatchAction {
         MatchAction::IGNORE_AND_SKIP
+    }
+
+    fn triggers(&self) -> &'static [&'static str] {
+        &["Cargo.toml"]
     }
 }
 
@@ -299,5 +322,23 @@ mod tests {
             ".egg-info should match"
         );
         Ok(())
+    }
+
+    #[test]
+    fn rust_target_rule_declares_cargo_toml_trigger() {
+        assert_eq!(RustTargetRule.triggers(), &["Cargo.toml"]);
+    }
+
+    #[test]
+    fn rule_engine_recognizes_cargo_toml_trigger() {
+        let engine = RuleEngine::new(vec![Box::new(RustTargetRule)]);
+        assert!(engine.is_trigger(OsStr::new("Cargo.toml")));
+        assert!(!engine.is_trigger(OsStr::new("package.json")));
+    }
+
+    #[test]
+    fn rule_engine_without_target_rule_has_no_triggers() {
+        let engine = RuleEngine::new(vec![Box::new(NodeModulesRule)]);
+        assert!(!engine.is_trigger(OsStr::new("Cargo.toml")));
     }
 }
