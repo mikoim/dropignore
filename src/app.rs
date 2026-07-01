@@ -236,6 +236,12 @@ fn rebuild_watches(
     registry: &mut WatchRegistry,
     rules: &RuleEngine,
 ) -> Result<()> {
+    // Ordering hazard: we tear down every watch *before* reseeding. That is
+    // safe only because `discover_watch_targets` currently never returns `Err`
+    // (it logs and skips per-entry failures). If discovery is ever made
+    // fallible, an overflow coinciding with that error would leave the loop
+    // with zero watches and block forever in `read_events_blocking`; the `Err`
+    // branch below would then need to reseed defensively rather than just warn.
     for descriptor in registry.drain_descriptors() {
         // EINVAL means the kernel already dropped this watch (inode gone);
         // nothing else is actionable, so ignore the result.
