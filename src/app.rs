@@ -1,10 +1,7 @@
 use crate::cli::CliArgs;
 use crate::discovery::{DiscoveredPaths, discover_watch_targets};
 use crate::dropbox::apply_dropbox_ignore;
-use crate::rules::{
-    Candidate, JsBuildArtifactsRule, NodeModulesRule, PnpmStoreRule, PythonBuildArtifactsRule,
-    RuleEngine, RustTargetRule,
-};
+use crate::rules::{ArtifactDirsRule, Candidate, EggInfoRule, RuleEngine, RustTargetRule};
 use crate::watch::{WatchRegistry, add_watch};
 use anyhow::{Context, Result};
 use inotify::{EventMask, Inotify};
@@ -26,11 +23,12 @@ pub(crate) fn run(args: CliArgs) -> Result<()> {
     ensure_directory(&root)?;
 
     let rule_engine = RuleEngine::new(vec![
-        Box::new(NodeModulesRule),
-        Box::new(PnpmStoreRule),
+        Box::new(ArtifactDirsRule::NODE_MODULES),
+        Box::new(ArtifactDirsRule::PNPM_STORE),
         Box::new(RustTargetRule),
-        Box::new(PythonBuildArtifactsRule),
-        Box::new(JsBuildArtifactsRule),
+        Box::new(ArtifactDirsRule::PYTHON_CACHES),
+        Box::new(EggInfoRule),
+        Box::new(ArtifactDirsRule::JS_BUILD),
     ]);
 
     // A signal handler flips this flag; the event loop polls it and exits
@@ -381,7 +379,6 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use crate::discovery::discover_watch_targets;
-    use crate::rules::{Candidate, NodeModulesRule, PythonBuildArtifactsRule};
     use crate::watch::{WatchRegistry, watch_mask};
     use inotify::Inotify;
     use std::os::unix::fs::symlink;
@@ -389,7 +386,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn engine() -> RuleEngine {
-        RuleEngine::new(vec![Box::new(NodeModulesRule)])
+        RuleEngine::new(vec![Box::new(ArtifactDirsRule::NODE_MODULES)])
     }
 
     #[test]
@@ -534,7 +531,6 @@ mod tests {
 
     #[test]
     fn rescan_subtree_reconciles_newly_matched_sibling() -> Result<()> {
-        use crate::rules::RustTargetRule;
         let temp = TempDir::new()?;
         let proj = temp.path().join("proj");
         let target = proj.join("target");
@@ -689,7 +685,7 @@ mod tests {
             path: &egg,
             file_type: metadata.file_type(),
         };
-        let rules = RuleEngine::new(vec![Box::new(PythonBuildArtifactsRule)]);
+        let rules = RuleEngine::new(vec![Box::new(EggInfoRule)]);
         let action = plan_entry(&candidate, &rules);
 
         assert!(action.apply_ignore, "matched *.egg-info file must be marked");

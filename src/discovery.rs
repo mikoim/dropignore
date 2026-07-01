@@ -110,7 +110,7 @@ pub(crate) fn discover_watch_targets(start: &Path, rules: &RuleEngine) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::{NodeModulesRule, PythonBuildArtifactsRule, RuleEngine, RustTargetRule};
+    use crate::rules::{ArtifactDirsRule, EggInfoRule, RuleEngine, RustTargetRule};
     use anyhow::{Context, Result};
     use std::fs;
     use tempfile::TempDir;
@@ -126,7 +126,7 @@ mod tests {
         fs::create_dir(&ignored_dir)?;
         fs::create_dir(&ignored_child)?;
 
-        let engine = RuleEngine::new(vec![Box::new(NodeModulesRule)]);
+        let engine = RuleEngine::new(vec![Box::new(ArtifactDirsRule::NODE_MODULES)]);
         let discovered = discover_watch_targets(temp.path(), &engine)?;
 
         assert!(
@@ -162,7 +162,10 @@ mod tests {
         fs::create_dir(&target_dir)?;
         fs::create_dir(&nested_dir)?;
 
-        let engine = RuleEngine::new(vec![Box::new(RustTargetRule), Box::new(NodeModulesRule)]);
+        let engine = RuleEngine::new(vec![
+            Box::new(RustTargetRule),
+            Box::new(ArtifactDirsRule::NODE_MODULES),
+        ]);
         let discovered = discover_watch_targets(cargo_root, &engine)?;
 
         assert!(
@@ -187,7 +190,7 @@ mod tests {
         let venv_dir = root.join(".venv");
         fs::create_dir(&venv_dir)?;
 
-        let engine = RuleEngine::new(vec![Box::new(PythonBuildArtifactsRule)]);
+        let engine = RuleEngine::new(vec![Box::new(ArtifactDirsRule::PYTHON_CACHES)]);
         let discovered = discover_watch_targets(root, &engine)?;
 
         assert!(
@@ -211,7 +214,7 @@ mod tests {
         fs::write(&top, b"")?;
         fs::write(&nested, b"")?;
 
-        let engine = RuleEngine::new(vec![Box::new(PythonBuildArtifactsRule)]);
+        let engine = RuleEngine::new(vec![Box::new(EggInfoRule)]);
         let discovered = discover_watch_targets(temp.path(), &engine)?;
 
         assert!(
@@ -233,7 +236,7 @@ mod tests {
         fs::create_dir(&cache)?;
         fs::create_dir(&nested)?;
 
-        let engine = RuleEngine::new(vec![Box::new(PythonBuildArtifactsRule)]);
+        let engine = RuleEngine::new(vec![Box::new(ArtifactDirsRule::PYTHON_CACHES)]);
         let discovered = discover_watch_targets(temp.path(), &engine)?;
 
         assert!(
