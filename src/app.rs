@@ -10,6 +10,7 @@ use inotify::{EventMask, Inotify};
 use log::{debug, info, warn};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::collections::HashSet;
 
 /// Entrypoint that wires argument parsing, rule initialization, and the inotify loop.
 pub(crate) fn run(args: CliArgs) -> Result<()> {
@@ -84,6 +85,9 @@ fn event_loop(
         // which keeps the borrow checker happy while allowing new watches to be added.
         let mut pending_directories: Vec<PathBuf> = Vec::new();
         let mut needs_rescan = false;
+        // Distinct subtrees to rescan because a rule trigger file appeared in
+        // them. Deduplicated so repeated triggers in one batch rescan once.
+        let mut rescan_scopes: HashSet<PathBuf> = HashSet::new();
 
         for event in events {
             // A queue overflow means the kernel dropped events; the descriptor
@@ -137,9 +141,9 @@ fn event_loop(
                 info!(
                     "Trigger file {} created; rescanning {} to reconcile dependent rules",
                     parent_dir.join(name).display(),
-                    root.display()
+                    parent_dir.display()
                 );
-                needs_rescan = true;
+                rescan_scopes.insert(parent_dir.to_path_buf());
             }
 
             let full_path = parent_dir.join(name);
@@ -190,7 +194,13 @@ fn event_loop(
         }
 
         if needs_rescan {
+            // Overflow dropped events: no descriptor is trustworthy, so rebuild
+            // the whole tree. This supersedes any recorded scopes (all under root).
             rescan_subtree(&root, dry_run, &mut watcher, &mut registry, &rule_engine)?;
+        } else {
+            for scope in &rescan_scopes {
+                rescan_subtree(scope, dry_run, &mut watcher, &mut registry, &rule_engine)?;
+            }
         }
     }
 }
