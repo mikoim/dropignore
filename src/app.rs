@@ -34,7 +34,7 @@ pub(crate) fn run(args: CliArgs) -> Result<()> {
     apply_discovered_paths(initial, args.dry_run, &mut watcher, &mut registry)?;
 
     info!("Watching {}", root.display());
-    event_loop(args.dry_run, watcher, registry, rule_engine)
+    event_loop(root, args.dry_run, watcher, registry, rule_engine)
 }
 
 /// Outcome of evaluating a single filesystem entry seen at runtime.
@@ -66,6 +66,7 @@ fn plan_entry(candidate: &Candidate<'_>, rules: &RuleEngine) -> EntryAction {
 
 /// Main blocking loop that reads inotify events and reacts to creations/moves.
 fn event_loop(
+    root: PathBuf,
     dry_run: bool,
     mut watcher: Inotify,
     mut registry: WatchRegistry,
@@ -81,8 +82,21 @@ fn event_loop(
         // Collect new directories to process after the borrow from `events` ends,
         // which keeps the borrow checker happy while allowing new watches to be added.
         let mut pending_directories: Vec<PathBuf> = Vec::new();
+        let mut needs_rescan = false;
 
         for event in events {
+            // A queue overflow means the kernel dropped events; the descriptor
+            // and name are invalid, so handle it before any lookup. Collapse
+            // multiple overflows in one batch into a single re-scan.
+            if event.mask.contains(EventMask::Q_OVERFLOW) {
+                warn!(
+                    "inotify queue overflowed; events were dropped, will rescan {}",
+                    root.display()
+                );
+                needs_rescan = true;
+                continue;
+            }
+
             // Remove bookkeeping for directories that disappeared or were moved,
             // so stale mappings can't resolve later events to the wrong path.
             if event.mask.contains(EventMask::DELETE_SELF)
@@ -161,6 +175,17 @@ fn event_loop(
 
             apply_discovered_paths(discovered, dry_run, &mut watcher, &mut registry)?;
         }
+
+        if needs_rescan {
+            match discover_watch_targets(&root, &rule_engine) {
+                Ok(discovered) => {
+                    apply_discovered_paths(discovered, dry_run, &mut watcher, &mut registry)?;
+                }
+                Err(err) => {
+                    warn!("Rescan after overflow failed for {}: {err}", root.display());
+                }
+            }
+        }
     }
 }
 
@@ -211,7 +236,10 @@ fn apply_discovered_paths(
 mod tests {
     use super::*;
     use anyhow::Result;
+    use crate::discovery::discover_watch_targets;
     use crate::rules::{Candidate, NodeModulesRule};
+    use crate::watch::WatchRegistry;
+    use inotify::Inotify;
     use std::os::unix::fs::symlink;
     use std::path::Path;
     use tempfile::TempDir;
@@ -285,5 +313,31 @@ mod tests {
 
         assert_eq!(failures, 1, "the single failing path should be counted");
         assert_eq!(seen, paths, "every path must be visited even after a failure");
+    }
+
+    #[test]
+    fn rescan_is_idempotent() -> Result<()> {
+        let temp = TempDir::new()?;
+        fs::create_dir(temp.path().join("a"))?;
+        fs::create_dir(temp.path().join("a").join("b"))?;
+        fs::create_dir(temp.path().join("node_modules"))?;
+
+        let rules = engine();
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+
+        let first = discover_watch_targets(temp.path(), &rules)?;
+        apply_discovered_paths(first, true, &mut watcher, &mut registry)?;
+        let after_first = registry.watched_count();
+
+        // Re-scanning the same tree (as overflow recovery does) must not
+        // register duplicate watches.
+        let second = discover_watch_targets(temp.path(), &rules)?;
+        apply_discovered_paths(second, true, &mut watcher, &mut registry)?;
+        let after_second = registry.watched_count();
+
+        assert_eq!(after_first, after_second, "re-scan must not add duplicate watches");
+        assert!(after_first >= 3, "root + a + a/b should be watched, node_modules skipped");
+        Ok(())
     }
 }
