@@ -231,6 +231,35 @@ impl Rule for PythonBuildArtifactsRule {
     }
 }
 
+/// JavaScript framework build output and tool cache directories matched by
+/// exact name. Each is reproducible and never holds user source. `.turbo` is
+/// Turborepo's local cache (verified against its docs).
+const JS_ARTIFACT_DIRS: &[&str] = &[".next", ".nuxt", ".turbo", ".parcel-cache"];
+
+/// Rule that matches JavaScript build/cache directories by exact name.
+pub(crate) struct JsBuildArtifactsRule;
+
+impl Rule for JsBuildArtifactsRule {
+    fn name(&self) -> &'static str {
+        "JavaScript build/cache directory"
+    }
+
+    fn matches(&self, candidate: &Candidate<'_>) -> bool {
+        if !candidate.is_dir() {
+            return false;
+        }
+        candidate
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| JS_ARTIFACT_DIRS.contains(&name))
+    }
+
+    fn action(&self) -> MatchAction {
+        MatchAction::IGNORE_AND_SKIP
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,6 +430,47 @@ mod tests {
         };
         let engine = RuleEngine::new(vec![Box::new(PythonBuildArtifactsRule)]);
         assert!(engine.evaluate(&candidate).is_none(), "src must not match");
+        Ok(())
+    }
+
+    #[test]
+    fn js_build_artifacts_rule_matches_framework_dirs() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let engine = RuleEngine::new(vec![Box::new(JsBuildArtifactsRule)]);
+
+        for name in [".next", ".nuxt", ".turbo", ".parcel-cache"] {
+            let dir = temp.path().join(name);
+            fs::create_dir(&dir)?;
+            let meta = fs::metadata(&dir)?;
+            let candidate = Candidate {
+                path: &dir,
+                file_type: meta.file_type(),
+            };
+            let result = engine
+                .evaluate(&candidate)
+                .unwrap_or_else(|| panic!("{name} should match"));
+            assert_eq!(result.name, "JavaScript build/cache directory");
+            assert!(result.action.set_dropbox_ignore, "{name} must be marked");
+            assert!(result.action.skip_descendants, "{name} must skip descendants");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn js_build_artifacts_rule_ignores_file_named_like_dir() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let file = temp.path().join(".turbo");
+        fs::write(&file, b"")?;
+        let meta = fs::metadata(&file)?;
+        let candidate = Candidate {
+            path: &file,
+            file_type: meta.file_type(),
+        };
+        let engine = RuleEngine::new(vec![Box::new(JsBuildArtifactsRule)]);
+        assert!(
+            engine.evaluate(&candidate).is_none(),
+            "a regular file named .turbo must not match"
+        );
         Ok(())
     }
 }

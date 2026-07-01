@@ -2,7 +2,8 @@ use crate::cli::CliArgs;
 use crate::discovery::{DiscoveredPaths, discover_watch_targets};
 use crate::dropbox::apply_dropbox_ignore;
 use crate::rules::{
-    Candidate, NodeModulesRule, PnpmStoreRule, PythonBuildArtifactsRule, RuleEngine, RustTargetRule,
+    Candidate, JsBuildArtifactsRule, NodeModulesRule, PnpmStoreRule, PythonBuildArtifactsRule,
+    RuleEngine, RustTargetRule,
 };
 use crate::watch::{WatchRegistry, add_watch};
 use anyhow::{Context, Result};
@@ -25,6 +26,7 @@ pub(crate) fn run(args: CliArgs) -> Result<()> {
         Box::new(PnpmStoreRule),
         Box::new(RustTargetRule),
         Box::new(PythonBuildArtifactsRule),
+        Box::new(JsBuildArtifactsRule),
     ]);
     let mut watcher = Inotify::init().context("Failed to initialize inotify")?;
     let mut registry = WatchRegistry::default();
