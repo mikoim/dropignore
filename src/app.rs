@@ -255,7 +255,7 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use crate::discovery::discover_watch_targets;
-    use crate::rules::{Candidate, NodeModulesRule};
+    use crate::rules::{Candidate, NodeModulesRule, PythonBuildArtifactsRule};
     use crate::watch::{WatchRegistry, watch_mask};
     use inotify::Inotify;
     use std::os::unix::fs::symlink;
@@ -403,6 +403,25 @@ mod tests {
             fresh.watchers.len(),
             "registry must match a fresh discovery exactly"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_entry_applies_matched_non_directory_without_watching() -> Result<()> {
+        let temp = TempDir::new()?;
+        let egg = temp.path().join("pkg.egg-info");
+        fs::write(&egg, b"")?;
+
+        let metadata = fs::symlink_metadata(&egg)?;
+        let candidate = Candidate {
+            path: &egg,
+            metadata: &metadata,
+        };
+        let rules = RuleEngine::new(vec![Box::new(PythonBuildArtifactsRule)]);
+        let action = plan_entry(&candidate, &rules);
+
+        assert!(action.apply_ignore, "matched *.egg-info file must be marked");
+        assert!(!action.watch_dir, "a non-directory must not be watched");
         Ok(())
     }
 }
