@@ -32,4 +32,4 @@ cargo test
 ```
 
 ## Extending rules
-Add a new type implementing the `Rule` trait in `src/main.rs`, return the desired `MatchAction`, and register it in `RuleEngine::new`. The existing rules serve as templates.
+Add a new type implementing the `Rule` trait in `src/rules.rs`, return the desired `MatchAction`, and register it in the `RuleEngine::new` call in `src/app.rs`. The existing rules serve as templates.
