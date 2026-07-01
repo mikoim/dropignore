@@ -227,8 +227,7 @@ impl Rule for EggInfoRule {
         candidate
             .path
             .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(".egg-info"))
+            .is_some_and(|name| name.as_encoded_bytes().ends_with(b".egg-info"))
     }
 
     fn action(&self) -> MatchAction {
@@ -489,6 +488,25 @@ mod tests {
             assert!(EggInfoRule.matches(&candidate), "{} should match", path.display());
         }
         assert_eq!(EggInfoRule.action(), MatchAction::IGNORE_AND_SKIP);
+        Ok(())
+    }
+
+    #[test]
+    fn egg_info_rule_matches_non_utf8_prefixed_name() -> Result<()> {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let name = OsStr::from_bytes(b"\xffpkg.egg-info");
+        let file = temp.path().join(name);
+        fs::write(&file, b"")?;
+
+        let meta = fs::metadata(&file)?;
+        let candidate = Candidate { path: &file, file_type: meta.file_type() };
+        assert!(
+            EggInfoRule.matches(&candidate),
+            "an .egg-info suffix must match even when the name has non-UTF-8 bytes"
+        );
         Ok(())
     }
 }

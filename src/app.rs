@@ -577,7 +577,7 @@ mod tests {
         fs::create_dir_all(&a_inner)?;
         fs::create_dir_all(&b_inner)?;
 
-        let rules = engine(); // NodeModulesRule only
+        let rules = engine(); // ArtifactDirsRule::NODE_MODULES only
         let mut watcher = Inotify::init()?;
         let mut registry = WatchRegistry::default();
         let discovered = discover_watch_targets(temp.path(), &rules)?;
@@ -599,7 +599,7 @@ mod tests {
 
         let temp = TempDir::new()?;
         let root = temp.path().to_path_buf();
-        let rules = engine(); // NodeModulesRule only
+        let rules = engine(); // ArtifactDirsRule::NODE_MODULES only
         let mut watcher = Inotify::init()?;
         let mut registry = WatchRegistry::default();
 
