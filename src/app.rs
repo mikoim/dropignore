@@ -14,6 +14,8 @@ use std::io::ErrorKind;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Entrypoint that wires argument parsing, rule initialization, and the inotify loop.
 pub(crate) fn run(args: CliArgs) -> Result<()> {
@@ -30,6 +32,15 @@ pub(crate) fn run(args: CliArgs) -> Result<()> {
         Box::new(PythonBuildArtifactsRule),
         Box::new(JsBuildArtifactsRule),
     ]);
+
+    // A signal handler flips this flag; the event loop polls it and exits
+    // cleanly so a supervisor's SIGTERM yields exit code 0 rather than 143.
+    let shutdown = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown))
+        .context("Failed to register SIGINT handler")?;
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&shutdown))
+        .context("Failed to register SIGTERM handler")?;
+
     let mut watcher = Inotify::init().context("Failed to initialize inotify")?;
     let mut registry = WatchRegistry::default();
 
@@ -39,7 +50,8 @@ pub(crate) fn run(args: CliArgs) -> Result<()> {
     apply_discovered_paths(initial, args.dry_run, &mut watcher, &mut registry)?;
 
     info!("Watching {}", root.display());
-    event_loop(root, args.dry_run, watcher, registry, rule_engine)
+    let _final_registry = event_loop(root, args.dry_run, watcher, registry, rule_engine, shutdown)?;
+    Ok(())
 }
 
 /// Outcome of evaluating a single filesystem entry seen at runtime.
@@ -111,17 +123,22 @@ fn poll_inotify(fd: RawFd, timeout_ms: i32) -> Result<PollResult> {
 }
 
 /// Main blocking loop that waits for inotify events and reacts to
-/// creations/moves. Runs until the process is killed (shutdown gating is added
-/// in a later change).
+/// creations/moves. Runs until `shutdown` is flipped by a signal handler,
+/// then returns the final registry (useful for tests; `run` discards it).
 fn event_loop(
     root: PathBuf,
     dry_run: bool,
     mut watcher: Inotify,
     mut registry: WatchRegistry,
     rule_engine: RuleEngine,
-) -> Result<()> {
+    shutdown: Arc<AtomicBool>,
+) -> Result<WatchRegistry> {
     let fd = watcher.as_raw_fd();
     loop {
+        if shutdown.load(Ordering::Relaxed) {
+            info!("Received shutdown signal, stopping watcher");
+            break;
+        }
         match poll_inotify(fd, POLL_TIMEOUT_MS)? {
             PollResult::Interrupted | PollResult::TimedOut => continue,
             PollResult::Readable => {
@@ -129,6 +146,7 @@ fn event_loop(
             }
         }
     }
+    Ok(registry)
 }
 
 /// Read one buffer's worth of inotify events (non-blocking) and apply all
@@ -615,6 +633,46 @@ mod tests {
         assert!(
             !registry.contains_path(&nm),
             "node_modules must be skipped (matched), not watched"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn event_loop_stops_when_shutdown_flag_is_set() -> Result<()> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let temp = TempDir::new()?;
+        let root = temp.path().to_path_buf();
+        let rules = engine();
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+        let initial = discover_watch_targets(&root, &rules)?;
+        apply_discovered_paths(initial, true, &mut watcher, &mut registry)?;
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&shutdown);
+        let root_for_thread = root.clone();
+        let handle =
+            thread::spawn(move || event_loop(root_for_thread, true, watcher, registry, rules, flag));
+
+        // Let the loop reach its poll wait, then request shutdown.
+        thread::sleep(Duration::from_millis(50));
+        shutdown.store(true, Ordering::Relaxed);
+
+        // The loop must return within a bounded time (poll timeout is 500 ms).
+        let start = Instant::now();
+        let returned = handle.join().expect("event loop thread panicked");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "shutdown must be prompt"
+        );
+        let registry = returned?;
+        assert!(
+            registry.contains_path(&root),
+            "returned registry must retain the root watch"
         );
         Ok(())
     }
