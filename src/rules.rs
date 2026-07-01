@@ -95,7 +95,8 @@ impl RuleEngine {
     /// created entry with this name should schedule a rescan so order-dependent
     /// rules (e.g. Cargo `target`) are reconciled. Non-UTF-8 names never match.
     pub(crate) fn is_trigger(&self, name: &OsStr) -> bool {
-        name.to_str().is_some_and(|name| self.triggers.contains(name))
+        name.to_str()
+            .is_some_and(|name| self.triggers.contains(name))
     }
 
     /// Returns the first matching rule. The ordering in `rules` defines priority.
@@ -109,40 +110,6 @@ impl RuleEngine {
             }
         }
         None
-    }
-}
-
-/// Rule that matches directories named exactly `node_modules`.
-pub(crate) struct NodeModulesRule;
-
-impl Rule for NodeModulesRule {
-    fn name(&self) -> &'static str {
-        "node_modules directory"
-    }
-
-    fn matches(&self, candidate: &Candidate<'_>) -> bool {
-        candidate.is_dir_named("node_modules")
-    }
-
-    fn action(&self) -> MatchAction {
-        MatchAction::IGNORE_AND_SKIP
-    }
-}
-
-/// Rule that matches pnpm's content-addressable store directory `.pnpm-store`.
-pub(crate) struct PnpmStoreRule;
-
-impl Rule for PnpmStoreRule {
-    fn name(&self) -> &'static str {
-        "pnpm store directory"
-    }
-
-    fn matches(&self, candidate: &Candidate<'_>) -> bool {
-        candidate.is_dir_named(".pnpm-store")
-    }
-
-    fn action(&self) -> MatchAction {
-        MatchAction::IGNORE_AND_SKIP
     }
 }
 
@@ -193,55 +160,42 @@ const PYTHON_ARTIFACT_DIRS: &[&str] = &[
     ".tox",
 ];
 
-/// Rule that captures large, reproducible Python build or cache artifacts typically
-/// found in uv-managed projects. These are safe to ignore in Dropbox sync to reduce
-/// noise and storage churn.
-pub(crate) struct PythonBuildArtifactsRule;
-
-impl Rule for PythonBuildArtifactsRule {
-    fn name(&self) -> &'static str {
-        "Python build/cache artifact"
-    }
-
-    fn matches(&self, candidate: &Candidate<'_>) -> bool {
-        let Some(file_name) = candidate.path.file_name() else {
-            return false;
-        };
-
-        let name = file_name.to_string_lossy();
-
-        // Reproducible environment/cache directories matched by exact name.
-        if candidate.is_dir() && PYTHON_ARTIFACT_DIRS.contains(&name.as_ref()) {
-            return true;
-        }
-
-        // egg-info metadata can be a directory or file; match by suffix. This
-        // intentionally excludes other transient caches to keep the rule scoped.
-        if name.ends_with(".egg-info") {
-            return true;
-        }
-
-        false
-    }
-
-    fn action(&self) -> MatchAction {
-        // Directories should not be traversed; files have no descendants,
-        // so this flag is fine to leave true for both cases.
-        MatchAction::IGNORE_AND_SKIP
-    }
-}
-
 /// JavaScript framework build output and tool cache directories matched by
 /// exact name. Each is reproducible and never holds user source. `.turbo` is
 /// Turborepo's local cache (verified against its docs).
 const JS_ARTIFACT_DIRS: &[&str] = &[".next", ".nuxt", ".turbo", ".parcel-cache"];
 
-/// Rule that matches JavaScript build/cache directories by exact name.
-pub(crate) struct JsBuildArtifactsRule;
+/// Rule matching directories whose exact name is in a fixed list. This is the
+/// common "tool-owned artifact directory" shape; every instance marks the
+/// match and skips its descendants. Adding a directory to an existing
+/// instance's list is a one-line change; a new category is a new constant.
+pub(crate) struct ArtifactDirsRule {
+    name: &'static str,
+    dirs: &'static [&'static str],
+}
 
-impl Rule for JsBuildArtifactsRule {
+impl ArtifactDirsRule {
+    pub(crate) const NODE_MODULES: Self = Self {
+        name: "node_modules directory",
+        dirs: &["node_modules"],
+    };
+    pub(crate) const PNPM_STORE: Self = Self {
+        name: "pnpm store directory",
+        dirs: &[".pnpm-store"],
+    };
+    pub(crate) const PYTHON_CACHES: Self = Self {
+        name: "Python build/cache artifact",
+        dirs: PYTHON_ARTIFACT_DIRS,
+    };
+    pub(crate) const JS_BUILD: Self = Self {
+        name: "JavaScript build/cache directory",
+        dirs: JS_ARTIFACT_DIRS,
+    };
+}
+
+impl Rule for ArtifactDirsRule {
     fn name(&self) -> &'static str {
-        "JavaScript build/cache directory"
+        self.name
     }
 
     fn matches(&self, candidate: &Candidate<'_>) -> bool {
@@ -252,7 +206,29 @@ impl Rule for JsBuildArtifactsRule {
             .path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| JS_ARTIFACT_DIRS.contains(&name))
+            .is_some_and(|name| self.dirs.contains(&name))
+    }
+
+    fn action(&self) -> MatchAction {
+        MatchAction::IGNORE_AND_SKIP
+    }
+}
+
+/// Rule matching `*.egg-info` metadata by suffix. Unlike the directory-list
+/// rules this matches files as well as directories, so it stays a separate
+/// type.
+pub(crate) struct EggInfoRule;
+
+impl Rule for EggInfoRule {
+    fn name(&self) -> &'static str {
+        "Python egg-info metadata"
+    }
+
+    fn matches(&self, candidate: &Candidate<'_>) -> bool {
+        candidate
+            .path
+            .file_name()
+            .is_some_and(|name| name.as_encoded_bytes().ends_with(b".egg-info"))
     }
 
     fn action(&self) -> MatchAction {
@@ -277,7 +253,7 @@ mod tests {
             path: &target,
             file_type: metadata.file_type(),
         };
-        let engine = RuleEngine::new(vec![Box::new(NodeModulesRule)]);
+        let engine = RuleEngine::new(vec![Box::new(ArtifactDirsRule::NODE_MODULES)]);
 
         let result = engine
             .evaluate(&candidate)
@@ -300,7 +276,7 @@ mod tests {
             path: &target,
             file_type: metadata.file_type(),
         };
-        let engine = RuleEngine::new(vec![Box::new(PnpmStoreRule)]);
+        let engine = RuleEngine::new(vec![Box::new(ArtifactDirsRule::PNPM_STORE)]);
 
         let result = engine
             .evaluate(&candidate)
@@ -327,7 +303,10 @@ mod tests {
             path: &target_dir,
             file_type: metadata.file_type(),
         };
-        let engine = RuleEngine::new(vec![Box::new(RustTargetRule), Box::new(NodeModulesRule)]);
+        let engine = RuleEngine::new(vec![
+            Box::new(RustTargetRule),
+            Box::new(ArtifactDirsRule::NODE_MODULES),
+        ]);
 
         let result = engine
             .evaluate(&candidate)
@@ -348,7 +327,10 @@ mod tests {
         fs::create_dir(&venv_dir)?;
         fs::create_dir(&egg_info_dir)?;
 
-        let engine = RuleEngine::new(vec![Box::new(PythonBuildArtifactsRule)]);
+        let engine = RuleEngine::new(vec![
+            Box::new(ArtifactDirsRule::PYTHON_CACHES),
+            Box::new(EggInfoRule),
+        ]);
 
         let venv_meta = fs::metadata(&venv_dir)?;
         let venv_candidate = Candidate {
@@ -386,14 +368,14 @@ mod tests {
 
     #[test]
     fn rule_engine_without_target_rule_has_no_triggers() {
-        let engine = RuleEngine::new(vec![Box::new(NodeModulesRule)]);
+        let engine = RuleEngine::new(vec![Box::new(ArtifactDirsRule::NODE_MODULES)]);
         assert!(!engine.is_trigger(OsStr::new("Cargo.toml")));
     }
 
     #[test]
     fn python_artifact_rule_matches_tool_caches() -> Result<()> {
         let temp = TempDir::new().context("Failed to create temp dir")?;
-        let engine = RuleEngine::new(vec![Box::new(PythonBuildArtifactsRule)]);
+        let engine = RuleEngine::new(vec![Box::new(ArtifactDirsRule::PYTHON_CACHES)]);
 
         for name in [
             "__pycache__",
@@ -413,7 +395,10 @@ mod tests {
                 .evaluate(&candidate)
                 .unwrap_or_else(|| panic!("{name} should match"));
             assert!(result.action.set_dropbox_ignore, "{name} must be marked");
-            assert!(result.action.skip_descendants, "{name} must skip descendants");
+            assert!(
+                result.action.skip_descendants,
+                "{name} must skip descendants"
+            );
         }
         Ok(())
     }
@@ -428,7 +413,7 @@ mod tests {
             path: &dir,
             file_type: meta.file_type(),
         };
-        let engine = RuleEngine::new(vec![Box::new(PythonBuildArtifactsRule)]);
+        let engine = RuleEngine::new(vec![Box::new(ArtifactDirsRule::PYTHON_CACHES)]);
         assert!(engine.evaluate(&candidate).is_none(), "src must not match");
         Ok(())
     }
@@ -436,7 +421,7 @@ mod tests {
     #[test]
     fn js_build_artifacts_rule_matches_framework_dirs() -> Result<()> {
         let temp = TempDir::new().context("Failed to create temp dir")?;
-        let engine = RuleEngine::new(vec![Box::new(JsBuildArtifactsRule)]);
+        let engine = RuleEngine::new(vec![Box::new(ArtifactDirsRule::JS_BUILD)]);
 
         for name in [".next", ".nuxt", ".turbo", ".parcel-cache"] {
             let dir = temp.path().join(name);
@@ -451,25 +436,115 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} should match"));
             assert_eq!(result.name, "JavaScript build/cache directory");
             assert!(result.action.set_dropbox_ignore, "{name} must be marked");
-            assert!(result.action.skip_descendants, "{name} must skip descendants");
+            assert!(
+                result.action.skip_descendants,
+                "{name} must skip descendants"
+            );
         }
         Ok(())
     }
 
     #[test]
-    fn js_build_artifacts_rule_ignores_file_named_like_dir() -> Result<()> {
+    fn artifact_dirs_rule_instances_match_their_directories() -> Result<()> {
         let temp = TempDir::new().context("Failed to create temp dir")?;
-        let file = temp.path().join(".turbo");
+        let cases: &[(&ArtifactDirsRule, &str, &str)] = &[
+            (
+                &ArtifactDirsRule::NODE_MODULES,
+                "node_modules",
+                "node_modules directory",
+            ),
+            (
+                &ArtifactDirsRule::PNPM_STORE,
+                ".pnpm-store",
+                "pnpm store directory",
+            ),
+            (
+                &ArtifactDirsRule::PYTHON_CACHES,
+                "__pycache__",
+                "Python build/cache artifact",
+            ),
+            (
+                &ArtifactDirsRule::JS_BUILD,
+                ".next",
+                "JavaScript build/cache directory",
+            ),
+        ];
+
+        for (rule, dir_name, rule_name) in cases {
+            assert_eq!(rule.name(), *rule_name);
+            let dir = temp.path().join(dir_name);
+            fs::create_dir(&dir)?;
+            let meta = fs::metadata(&dir)?;
+            let candidate = Candidate {
+                path: &dir,
+                file_type: meta.file_type(),
+            };
+            assert!(rule.matches(&candidate), "{dir_name} should match");
+            assert_eq!(rule.action(), MatchAction::IGNORE_AND_SKIP);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn artifact_dirs_rule_ignores_file_named_like_dir() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let file = temp.path().join("node_modules");
         fs::write(&file, b"")?;
         let meta = fs::metadata(&file)?;
         let candidate = Candidate {
             path: &file,
             file_type: meta.file_type(),
         };
-        let engine = RuleEngine::new(vec![Box::new(JsBuildArtifactsRule)]);
         assert!(
-            engine.evaluate(&candidate).is_none(),
-            "a regular file named .turbo must not match"
+            !ArtifactDirsRule::NODE_MODULES.matches(&candidate),
+            "a regular file named node_modules must not match"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn egg_info_rule_matches_file_and_directory() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let egg_file = temp.path().join("pkg.egg-info");
+        let egg_dir = temp.path().join("other.egg-info");
+        fs::write(&egg_file, b"")?;
+        fs::create_dir(&egg_dir)?;
+
+        assert_eq!(EggInfoRule.name(), "Python egg-info metadata");
+        for path in [&egg_file, &egg_dir] {
+            let meta = fs::metadata(path)?;
+            let candidate = Candidate {
+                path,
+                file_type: meta.file_type(),
+            };
+            assert!(
+                EggInfoRule.matches(&candidate),
+                "{} should match",
+                path.display()
+            );
+        }
+        assert_eq!(EggInfoRule.action(), MatchAction::IGNORE_AND_SKIP);
+        Ok(())
+    }
+
+    #[test]
+    fn egg_info_rule_matches_non_utf8_prefixed_name() -> Result<()> {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let name = OsStr::from_bytes(b"\xffpkg.egg-info");
+        let file = temp.path().join(name);
+        fs::write(&file, b"")?;
+
+        let meta = fs::metadata(&file)?;
+        let candidate = Candidate {
+            path: &file,
+            file_type: meta.file_type(),
+        };
+        assert!(
+            EggInfoRule.matches(&candidate),
+            "an .egg-info suffix must match even when the name has non-UTF-8 bytes"
         );
         Ok(())
     }

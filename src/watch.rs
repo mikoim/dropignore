@@ -1,6 +1,6 @@
 use anyhow::Result;
 use inotify::{Inotify, WatchDescriptor, WatchMask};
-use log::debug;
+use log::{debug, warn};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -28,6 +28,12 @@ fn watch_error_context(path: &Path, err: &std::io::Error) -> String {
 }
 
 /// Register a directory with inotify if it has not already been registered.
+///
+/// Contract: only ENOSPC (inotify watch limit reached) is fatal. Any other
+/// failure — the directory vanished before registration (ENOENT), permission
+/// denied (EACCES), a non-directory due to `ONLYDIR` (ENOTDIR), … — is logged
+/// at warn and skipped, so one bad path cannot take down the watcher. This
+/// mirrors the discovery walk, which warns and skips unreadable directories.
 pub(crate) fn add_watch(
     watcher: &mut Inotify,
     registry: &mut WatchRegistry,
@@ -37,13 +43,17 @@ pub(crate) fn add_watch(
         return Ok(());
     }
 
-    let descriptor = watcher
-        .watches()
-        .add(path, watch_mask())
-        .map_err(|err| {
+    let descriptor = match watcher.watches().add(path, watch_mask()) {
+        Ok(descriptor) => descriptor,
+        Err(err) if err.raw_os_error() == Some(libc::ENOSPC) => {
             let context = watch_error_context(path, &err);
-            anyhow::Error::new(err).context(context)
-        })?;
+            return Err(anyhow::Error::new(err).context(context));
+        }
+        Err(err) => {
+            warn!("{}: {err}; skipping", watch_error_context(path, &err));
+            return Ok(());
+        }
+    };
 
     registry.insert(path.to_path_buf(), descriptor);
     debug!("Watching {}", path.display());
@@ -129,10 +139,31 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn add_watch_skips_nonexistent_path() -> Result<()> {
+        let mut inotify = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+        let missing = Path::new("/nonexistent-dropignore-test-path");
+
+        add_watch(&mut inotify, &mut registry, missing)?;
+
+        assert!(
+            !registry.contains_path(missing),
+            "a path that failed to register must not enter the registry"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn watch_mask_includes_move_and_delete_self() {
         let mask = watch_mask();
-        assert!(mask.contains(WatchMask::MOVE_SELF), "MOVE_SELF must be watched");
-        assert!(mask.contains(WatchMask::DELETE_SELF), "DELETE_SELF must be watched");
+        assert!(
+            mask.contains(WatchMask::MOVE_SELF),
+            "MOVE_SELF must be watched"
+        );
+        assert!(
+            mask.contains(WatchMask::DELETE_SELF),
+            "DELETE_SELF must be watched"
+        );
     }
 
     #[test]
@@ -145,11 +176,21 @@ mod tests {
         registry.insert(temp.path().to_path_buf(), descriptor.clone());
 
         assert!(registry.contains_path(temp.path()));
-        assert_eq!(registry.path_for(&descriptor), Some(&temp.path().to_path_buf()));
+        assert_eq!(
+            registry.path_for(&descriptor),
+            Some(&temp.path().to_path_buf())
+        );
 
         registry.remove_by_descriptor(&descriptor);
-        assert!(!registry.contains_path(temp.path()), "path mapping must be gone");
-        assert_eq!(registry.path_for(&descriptor), None, "descriptor mapping must be gone");
+        assert!(
+            !registry.contains_path(temp.path()),
+            "path mapping must be gone"
+        );
+        assert_eq!(
+            registry.path_for(&descriptor),
+            None,
+            "descriptor mapping must be gone"
+        );
         Ok(())
     }
 
@@ -182,7 +223,10 @@ mod tests {
         // still-watched inode): the old inverse mapping must not linger.
         registry.insert(new_path.clone(), descriptor.clone());
 
-        assert!(!registry.contains_path(&old_path), "stale path must be evicted");
+        assert!(
+            !registry.contains_path(&old_path),
+            "stale path must be evicted"
+        );
         assert!(registry.contains_path(&new_path));
         assert_eq!(registry.path_for(&descriptor), Some(&new_path));
         Ok(())
@@ -272,7 +316,11 @@ mod tests {
 
         let drained = registry.drain_subtree(temp.path());
         assert_eq!(drained.len(), 3, "every descriptor returned");
-        assert_eq!(registry.watched_count(), 0, "registry empty after root drain");
+        assert_eq!(
+            registry.watched_count(),
+            0,
+            "registry empty after root drain"
+        );
         Ok(())
     }
 }
