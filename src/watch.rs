@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use inotify::{Inotify, WatchDescriptor, WatchMask};
 use log::debug;
 use std::collections::HashMap;
@@ -11,6 +11,20 @@ pub(crate) fn watch_mask() -> WatchMask {
         | WatchMask::DELETE_SELF
         | WatchMask::MOVE_SELF
         | WatchMask::ONLYDIR
+}
+
+/// Build the error context for a failed `add_watch`. When the kernel reports
+/// ENOSPC the real cause is usually the inotify watch limit, so point the user
+/// at the tunable rather than leaving a bare "No space left on device".
+fn watch_error_context(path: &Path, err: &std::io::Error) -> String {
+    if err.raw_os_error() == Some(libc::ENOSPC) {
+        format!(
+            "Failed to add watch for {} (inotify watch limit reached; increase /proc/sys/fs/inotify/max_user_watches)",
+            path.display()
+        )
+    } else {
+        format!("Failed to add watch for {}", path.display())
+    }
 }
 
 /// Register a directory with inotify if it has not already been registered.
@@ -26,7 +40,10 @@ pub(crate) fn add_watch(
     let descriptor = watcher
         .watches()
         .add(path, watch_mask())
-        .with_context(|| format!("Failed to add watch for {}", path.display()))?;
+        .map_err(|err| {
+            let context = watch_error_context(path, &err);
+            anyhow::Error::new(err).context(context)
+        })?;
 
     registry.insert(path.to_path_buf(), descriptor);
     debug!("Watching {}", path.display());
@@ -91,5 +108,19 @@ mod tests {
         assert!(!registry.contains_path(temp.path()), "path mapping must be gone");
         assert_eq!(registry.path_for(&descriptor), None, "descriptor mapping must be gone");
         Ok(())
+    }
+
+    #[test]
+    fn watch_error_context_mentions_limit_on_enospc() {
+        let err = std::io::Error::from_raw_os_error(libc::ENOSPC);
+        let msg = watch_error_context(Path::new("/some/dir"), &err);
+        assert!(msg.contains("max_user_watches"), "got: {msg}");
+    }
+
+    #[test]
+    fn watch_error_context_is_plain_for_other_errors() {
+        let err = std::io::Error::from_raw_os_error(libc::EACCES);
+        let msg = watch_error_context(Path::new("/some/dir"), &err);
+        assert!(!msg.contains("max_user_watches"), "got: {msg}");
     }
 }
