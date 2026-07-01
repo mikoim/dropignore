@@ -44,6 +44,14 @@ pub(crate) struct RuleMatch {
     pub(crate) action: MatchAction,
 }
 
+impl RuleMatch {
+    /// Log that this match fired for `path`. Kept out of `RuleEngine::evaluate`
+    /// so that evaluation stays a pure query and the caller controls logging.
+    pub(crate) fn log_matched(&self, path: &Path) {
+        info!("Matched rule '{}' for {}", self.name, path.display());
+    }
+}
+
 /// Trait implemented by all matching rules to keep the system extensible.
 pub(crate) trait Rule: Send + Sync {
     /// Human readable name used for logging.
@@ -68,23 +76,13 @@ impl RuleEngine {
     pub(crate) fn evaluate(&self, candidate: &Candidate<'_>) -> Option<RuleMatch> {
         for rule in &self.rules {
             if rule.matches(candidate) {
-                let matched = RuleMatch {
+                return Some(RuleMatch {
                     name: rule.name(),
                     action: rule.action(),
-                };
-                info!(
-                    "Matched rule '{}' for {}",
-                    matched.name,
-                    candidate.path.display()
-                );
-                return Some(matched);
+                });
             }
         }
         None
-    }
-
-    pub(crate) fn evaluate_action(&self, candidate: &Candidate<'_>) -> Option<MatchAction> {
-        self.evaluate(candidate).map(|matched| matched.action)
     }
 }
 

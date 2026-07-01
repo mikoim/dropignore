@@ -53,9 +53,10 @@ fn plan_entry(candidate: &Candidate<'_>, rules: &RuleEngine) -> EntryAction {
 
     let mut apply_ignore = false;
     let mut skip_descendants = false;
-    if let Some(action) = rules.evaluate_action(candidate) {
-        apply_ignore = action.set_dropbox_ignore;
-        skip_descendants = action.skip_descendants;
+    if let Some(matched) = rules.evaluate(candidate) {
+        matched.log_matched(candidate.path);
+        apply_ignore = matched.action.set_dropbox_ignore;
+        skip_descendants = matched.action.skip_descendants;
     }
 
     EntryAction {
@@ -147,11 +148,9 @@ fn event_loop(
             let action = plan_entry(&candidate, &rule_engine);
 
             if action.apply_ignore {
-                // Continue past a failure here too; errors are already logged
-                // by apply_dropbox_ignore.
-                apply_all(std::slice::from_ref(&full_path), |path| {
-                    apply_dropbox_ignore(path, dry_run)
-                });
+                // Failure is already logged at error! by apply_dropbox_ignore;
+                // the loop continues to the next event regardless.
+                let _ = apply_dropbox_ignore(&full_path, dry_run);
             }
 
             if action.watch_dir {
@@ -215,8 +214,15 @@ fn apply_discovered_paths(
     registry: &mut WatchRegistry,
 ) -> Result<()> {
     // Apply to every match, continuing past individual failures so one bad
-    // path cannot terminate the watcher.
-    apply_all(&discovered.matches, |path| apply_dropbox_ignore(path, dry_run));
+    // path cannot terminate the watcher. Individual errors are logged by
+    // apply_dropbox_ignore; this adds a single rollup summary.
+    let failures = apply_all(&discovered.matches, |path| apply_dropbox_ignore(path, dry_run));
+    if failures > 0 {
+        warn!(
+            "Failed to mark {failures} of {} discovered path(s) as ignored",
+            discovered.matches.len()
+        );
+    }
 
     for directory in discovered.watchers {
         add_watch(watcher, registry, &directory)?;
