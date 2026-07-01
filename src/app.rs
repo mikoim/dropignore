@@ -190,7 +190,7 @@ fn event_loop(
         }
 
         if needs_rescan {
-            rebuild_watches(&root, dry_run, &mut watcher, &mut registry, &rule_engine)?;
+            rescan_subtree(&root, dry_run, &mut watcher, &mut registry, &rule_engine)?;
         }
     }
 }
@@ -245,32 +245,34 @@ fn apply_discovered_paths(
     Ok(())
 }
 
-/// Tear down every held watch and rebuild the watch set from the current tree.
-/// Used after a queue overflow, when dropped events mean no existing descriptor
-/// can be trusted (a directory may have been deleted, or deleted and recreated
-/// under the same name as a fresh inode).
-fn rebuild_watches(
-    root: &Path,
+/// Tear down every watch at or under `scope` and rebuild that portion of the
+/// watch set from the current tree. Used after a queue overflow (`scope` = the
+/// root), where dropped events mean no descriptor can be trusted, and when a
+/// rule's trigger file appears (`scope` = the trigger's parent), where a
+/// pre-existing sibling may have just started matching.
+fn rescan_subtree(
+    scope: &Path,
     dry_run: bool,
     watcher: &mut Inotify,
     registry: &mut WatchRegistry,
     rules: &RuleEngine,
 ) -> Result<()> {
-    // Ordering hazard: we tear down every watch *before* reseeding. That is
-    // safe only because `discover_watch_targets` currently never returns `Err`
-    // (it logs and skips per-entry failures). If discovery is ever made
-    // fallible, an overflow coinciding with that error would leave the loop
-    // with zero watches and block forever in `read_events_blocking`; the `Err`
-    // branch below would then need to reseed defensively rather than just warn.
-    for descriptor in registry.drain_descriptors() {
+    // Ordering hazard: we tear down watches *before* reseeding. For `scope` =
+    // root this is the same window the overflow path has always accepted; for
+    // any scope below the root the root watch survives, so a discovery failure
+    // cannot leave the loop blocked forever in `read_events_blocking`. This is
+    // safe today because `discover_watch_targets` never returns `Err` (it logs
+    // and skips per-entry failures); if that changes, the `Err` branch would
+    // need to reseed defensively rather than just warn.
+    for descriptor in registry.drain_subtree(scope) {
         // EINVAL means the kernel already dropped this watch (inode gone);
         // nothing else is actionable, so ignore the result.
         let _ = watcher.watches().remove(descriptor);
     }
-    match discover_watch_targets(root, rules) {
+    match discover_watch_targets(scope, rules) {
         Ok(discovered) => apply_discovered_paths(discovered, dry_run, watcher, registry),
         Err(err) => {
-            warn!("Rescan after overflow failed for {}: {err}", root.display());
+            warn!("Rescan of {} failed: {err}", scope.display());
             Ok(())
         }
     }
@@ -410,7 +412,7 @@ mod tests {
         registry.insert(ghost.clone(), ghost_wd);
         assert!(registry.contains_path(&ghost), "stale entry seeded");
 
-        rebuild_watches(temp.path(), true, &mut watcher, &mut registry, &rules)?;
+        rescan_subtree(temp.path(), true, &mut watcher, &mut registry, &rules)?;
 
         assert!(!registry.contains_path(&ghost), "stale entry must be pruned");
         assert!(registry.contains_path(temp.path()), "root must be re-watched");
@@ -429,6 +431,70 @@ mod tests {
             fresh.watchers.len(),
             "registry must match a fresh discovery exactly"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn rescan_subtree_reconciles_newly_matched_sibling() -> Result<()> {
+        use crate::rules::RustTargetRule;
+        let temp = TempDir::new()?;
+        let proj = temp.path().join("proj");
+        let target = proj.join("target");
+        let target_debug = target.join("debug");
+        let src = proj.join("src");
+        fs::create_dir_all(&target_debug)?;
+        fs::create_dir(&src)?;
+
+        let rules = RuleEngine::new(vec![Box::new(RustTargetRule)]);
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+
+        // No Cargo.toml yet: target does not match, so it and its subtree are
+        // watched.
+        let discovered = discover_watch_targets(&proj, &rules)?;
+        apply_discovered_paths(discovered, true, &mut watcher, &mut registry)?;
+        assert!(registry.contains_path(&target), "target watched pre-trigger");
+        assert!(
+            registry.contains_path(&target_debug),
+            "target/debug watched pre-trigger"
+        );
+
+        // Trigger appears; a scoped rescan must now skip target's subtree.
+        fs::write(proj.join("Cargo.toml"), b"[package]\nname=\"demo\"")?;
+        rescan_subtree(&proj, true, &mut watcher, &mut registry, &rules)?;
+
+        assert!(!registry.contains_path(&target), "matched target must not be watched");
+        assert!(
+            !registry.contains_path(&target_debug),
+            "target subtree must be pruned"
+        );
+        assert!(registry.contains_path(&proj), "project dir stays watched");
+        assert!(registry.contains_path(&src), "sibling src stays watched");
+        Ok(())
+    }
+
+    #[test]
+    fn rescan_subtree_leaves_out_of_scope_watches_intact() -> Result<()> {
+        let temp = TempDir::new()?;
+        let proj_a = temp.path().join("a");
+        let proj_b = temp.path().join("b");
+        let a_inner = proj_a.join("inner");
+        let b_inner = proj_b.join("inner");
+        fs::create_dir_all(&a_inner)?;
+        fs::create_dir_all(&b_inner)?;
+
+        let rules = engine(); // NodeModulesRule only
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+        let discovered = discover_watch_targets(temp.path(), &rules)?;
+        apply_discovered_paths(discovered, true, &mut watcher, &mut registry)?;
+        assert!(registry.contains_path(&b_inner));
+
+        rescan_subtree(&proj_a, true, &mut watcher, &mut registry, &rules)?;
+
+        assert!(registry.contains_path(&a_inner), "in-scope descendant re-added");
+        assert!(registry.contains_path(&proj_b), "out-of-scope project untouched");
+        assert!(registry.contains_path(&b_inner), "out-of-scope descendant untouched");
         Ok(())
     }
 
