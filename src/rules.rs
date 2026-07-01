@@ -63,7 +63,14 @@ pub(crate) trait Rule: Send + Sync {
     /// Behavior to apply when the rule matches.
     fn action(&self) -> MatchAction;
     /// Filenames whose creation may change this rule's verdict for a sibling.
-    /// Creating any of these under a watched directory schedules a rescan.
+    /// Creating any of these under a watched directory schedules a rescan of
+    /// that directory's subtree.
+    ///
+    /// Scope invariant: a trigger is assumed to affect verdicts only within the
+    /// trigger file's own directory subtree, so a scoped rescan fully
+    /// reconciles it. `RustTargetRule` satisfies this — it consults a sibling
+    /// `Cargo.toml`. A rule whose trigger has non-local effects would need a
+    /// wider rescan scope than the event loop currently uses.
     fn triggers(&self) -> &'static [&'static str] {
         &[]
     }
