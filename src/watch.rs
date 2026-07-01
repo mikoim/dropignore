@@ -6,7 +6,11 @@ use std::path::{Path, PathBuf};
 
 /// Compute the inotify mask used for every watched directory.
 pub(crate) fn watch_mask() -> WatchMask {
-    WatchMask::CREATE | WatchMask::MOVED_TO | WatchMask::DELETE_SELF | WatchMask::ONLYDIR
+    WatchMask::CREATE
+        | WatchMask::MOVED_TO
+        | WatchMask::DELETE_SELF
+        | WatchMask::MOVE_SELF
+        | WatchMask::ONLYDIR
 }
 
 /// Register a directory with inotify if it has not already been registered.
@@ -55,5 +59,37 @@ impl WatchRegistry {
 
     pub(crate) fn contains_path(&self, path: &Path) -> bool {
         self.by_path.contains_key(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use tempfile::TempDir;
+
+    #[test]
+    fn watch_mask_includes_move_and_delete_self() {
+        let mask = watch_mask();
+        assert!(mask.contains(WatchMask::MOVE_SELF), "MOVE_SELF must be watched");
+        assert!(mask.contains(WatchMask::DELETE_SELF), "DELETE_SELF must be watched");
+    }
+
+    #[test]
+    fn registry_insert_lookup_and_remove() -> Result<()> {
+        let temp = TempDir::new()?;
+        let inotify = Inotify::init()?;
+        let descriptor = inotify.watches().add(temp.path(), watch_mask())?;
+
+        let mut registry = WatchRegistry::default();
+        registry.insert(temp.path().to_path_buf(), descriptor.clone());
+
+        assert!(registry.contains_path(temp.path()));
+        assert_eq!(registry.path_for(&descriptor), Some(&temp.path().to_path_buf()));
+
+        registry.remove_by_descriptor(&descriptor);
+        assert!(!registry.contains_path(temp.path()), "path mapping must be gone");
+        assert_eq!(registry.path_for(&descriptor), None, "descriptor mapping must be gone");
+        Ok(())
     }
 }

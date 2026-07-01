@@ -56,8 +56,11 @@ fn event_loop(
         let mut pending_directories: Vec<PathBuf> = Vec::new();
 
         for event in events {
-            // Remove bookkeeping for directories that disappeared to avoid stale mappings.
-            if event.mask.contains(EventMask::DELETE_SELF) {
+            // Remove bookkeeping for directories that disappeared or were moved,
+            // so stale mappings can't resolve later events to the wrong path.
+            if event.mask.contains(EventMask::DELETE_SELF)
+                || event.mask.contains(EventMask::MOVE_SELF)
+            {
                 registry.remove_by_descriptor(&event.wd);
                 continue;
             }
