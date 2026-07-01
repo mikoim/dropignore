@@ -95,7 +95,8 @@ impl RuleEngine {
     /// created entry with this name should schedule a rescan so order-dependent
     /// rules (e.g. Cargo `target`) are reconciled. Non-UTF-8 names never match.
     pub(crate) fn is_trigger(&self, name: &OsStr) -> bool {
-        name.to_str().is_some_and(|name| self.triggers.contains(name))
+        name.to_str()
+            .is_some_and(|name| self.triggers.contains(name))
     }
 
     /// Returns the first matching rule. The ordering in `rules` defines priority.
@@ -394,7 +395,10 @@ mod tests {
                 .evaluate(&candidate)
                 .unwrap_or_else(|| panic!("{name} should match"));
             assert!(result.action.set_dropbox_ignore, "{name} must be marked");
-            assert!(result.action.skip_descendants, "{name} must skip descendants");
+            assert!(
+                result.action.skip_descendants,
+                "{name} must skip descendants"
+            );
         }
         Ok(())
     }
@@ -432,7 +436,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} should match"));
             assert_eq!(result.name, "JavaScript build/cache directory");
             assert!(result.action.set_dropbox_ignore, "{name} must be marked");
-            assert!(result.action.skip_descendants, "{name} must skip descendants");
+            assert!(
+                result.action.skip_descendants,
+                "{name} must skip descendants"
+            );
         }
         Ok(())
     }
@@ -441,10 +448,26 @@ mod tests {
     fn artifact_dirs_rule_instances_match_their_directories() -> Result<()> {
         let temp = TempDir::new().context("Failed to create temp dir")?;
         let cases: &[(&ArtifactDirsRule, &str, &str)] = &[
-            (&ArtifactDirsRule::NODE_MODULES, "node_modules", "node_modules directory"),
-            (&ArtifactDirsRule::PNPM_STORE, ".pnpm-store", "pnpm store directory"),
-            (&ArtifactDirsRule::PYTHON_CACHES, "__pycache__", "Python build/cache artifact"),
-            (&ArtifactDirsRule::JS_BUILD, ".next", "JavaScript build/cache directory"),
+            (
+                &ArtifactDirsRule::NODE_MODULES,
+                "node_modules",
+                "node_modules directory",
+            ),
+            (
+                &ArtifactDirsRule::PNPM_STORE,
+                ".pnpm-store",
+                "pnpm store directory",
+            ),
+            (
+                &ArtifactDirsRule::PYTHON_CACHES,
+                "__pycache__",
+                "Python build/cache artifact",
+            ),
+            (
+                &ArtifactDirsRule::JS_BUILD,
+                ".next",
+                "JavaScript build/cache directory",
+            ),
         ];
 
         for (rule, dir_name, rule_name) in cases {
@@ -452,7 +475,10 @@ mod tests {
             let dir = temp.path().join(dir_name);
             fs::create_dir(&dir)?;
             let meta = fs::metadata(&dir)?;
-            let candidate = Candidate { path: &dir, file_type: meta.file_type() };
+            let candidate = Candidate {
+                path: &dir,
+                file_type: meta.file_type(),
+            };
             assert!(rule.matches(&candidate), "{dir_name} should match");
             assert_eq!(rule.action(), MatchAction::IGNORE_AND_SKIP);
         }
@@ -465,7 +491,10 @@ mod tests {
         let file = temp.path().join("node_modules");
         fs::write(&file, b"")?;
         let meta = fs::metadata(&file)?;
-        let candidate = Candidate { path: &file, file_type: meta.file_type() };
+        let candidate = Candidate {
+            path: &file,
+            file_type: meta.file_type(),
+        };
         assert!(
             !ArtifactDirsRule::NODE_MODULES.matches(&candidate),
             "a regular file named node_modules must not match"
@@ -484,8 +513,15 @@ mod tests {
         assert_eq!(EggInfoRule.name(), "Python egg-info metadata");
         for path in [&egg_file, &egg_dir] {
             let meta = fs::metadata(path)?;
-            let candidate = Candidate { path, file_type: meta.file_type() };
-            assert!(EggInfoRule.matches(&candidate), "{} should match", path.display());
+            let candidate = Candidate {
+                path,
+                file_type: meta.file_type(),
+            };
+            assert!(
+                EggInfoRule.matches(&candidate),
+                "{} should match",
+                path.display()
+            );
         }
         assert_eq!(EggInfoRule.action(), MatchAction::IGNORE_AND_SKIP);
         Ok(())
@@ -502,7 +538,10 @@ mod tests {
         fs::write(&file, b"")?;
 
         let meta = fs::metadata(&file)?;
-        let candidate = Candidate { path: &file, file_type: meta.file_type() };
+        let candidate = Candidate {
+            path: &file,
+            file_type: meta.file_type(),
+        };
         assert!(
             EggInfoRule.matches(&candidate),
             "an .egg-info suffix must match even when the name has non-UTF-8 bytes"

@@ -93,9 +93,8 @@ mod tests {
         let c_name = CString::new("user.dropignore.probe").unwrap();
         // SAFETY: pointers are valid for the duration of the call; the value
         // is one byte and the length matches.
-        let result = unsafe {
-            libc::setxattr(c_path.as_ptr(), c_name.as_ptr(), b"1".as_ptr().cast(), 1, 0)
-        };
+        let result =
+            unsafe { libc::setxattr(c_path.as_ptr(), c_name.as_ptr(), b"1".as_ptr().cast(), 1, 0) };
         result == 0
     }
 

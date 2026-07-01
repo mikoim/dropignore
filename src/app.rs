@@ -6,11 +6,11 @@ use crate::watch::{WatchRegistry, add_watch};
 use anyhow::{Context, Result};
 use inotify::{EventMask, Inotify};
 use log::{debug, info, warn};
+use std::collections::HashSet;
 use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -63,7 +63,10 @@ struct EntryAction {
 /// `discover_watch_targets` and avoid escaping the watched tree.
 fn plan_entry(candidate: &Candidate<'_>, rules: &RuleEngine) -> EntryAction {
     if candidate.is_symlink() {
-        return EntryAction { apply_ignore: false, watch_dir: false };
+        return EntryAction {
+            apply_ignore: false,
+            watch_dir: false,
+        };
     }
 
     let mut apply_ignore = false;
@@ -157,7 +160,9 @@ fn drain_events(
     root: &Path,
     dry_run: bool,
 ) -> Result<()> {
-    let mut buffer = [0u8; 4096];
+    // 64 KiB drains large event bursts in fewer reads; still a single
+    // stack frame's allocation.
+    let mut buffer = [0u8; 65536];
     let events = match watcher.read_events(&mut buffer) {
         Ok(events) => events,
         // The fd is non-blocking; an empty queue is the normal terminator.
@@ -190,8 +195,7 @@ fn drain_events(
 
         // Remove bookkeeping for directories that disappeared or were moved,
         // so stale mappings can't resolve later events to the wrong path.
-        if event.mask.contains(EventMask::DELETE_SELF)
-            || event.mask.contains(EventMask::MOVE_SELF)
+        if event.mask.contains(EventMask::DELETE_SELF) || event.mask.contains(EventMask::MOVE_SELF)
         {
             registry.remove_by_descriptor(&event.wd);
             continue;
@@ -326,7 +330,9 @@ fn apply_discovered_paths(
     // Apply to every match, continuing past individual failures so one bad
     // path cannot terminate the watcher. Individual errors are logged by
     // apply_dropbox_ignore; this adds a single rollup summary.
-    let failures = apply_all(&discovered.matches, |path| apply_dropbox_ignore(path, dry_run));
+    let failures = apply_all(&discovered.matches, |path| {
+        apply_dropbox_ignore(path, dry_run)
+    });
     if failures > 0 {
         warn!(
             "Failed to mark {failures} of {} discovered path(s) as ignored",
@@ -377,9 +383,9 @@ fn rescan_subtree(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::Result;
     use crate::discovery::discover_watch_targets;
     use crate::watch::{WatchRegistry, watch_mask};
+    use anyhow::Result;
     use inotify::Inotify;
     use std::os::unix::fs::symlink;
     use std::path::Path;
@@ -398,7 +404,10 @@ mod tests {
         symlink(&real_dir, &link)?;
 
         let metadata = fs::symlink_metadata(&link)?;
-        let candidate = Candidate { path: &link, file_type: metadata.file_type() };
+        let candidate = Candidate {
+            path: &link,
+            file_type: metadata.file_type(),
+        };
         let action = plan_entry(&candidate, &engine());
 
         assert!(!action.apply_ignore, "symlink must not be marked");
@@ -413,7 +422,10 @@ mod tests {
         fs::create_dir(&dir)?;
 
         let metadata = fs::symlink_metadata(&dir)?;
-        let candidate = Candidate { path: &dir, file_type: metadata.file_type() };
+        let candidate = Candidate {
+            path: &dir,
+            file_type: metadata.file_type(),
+        };
         let action = plan_entry(&candidate, &engine());
 
         assert!(!action.apply_ignore);
@@ -428,7 +440,10 @@ mod tests {
         fs::create_dir(&dir)?;
 
         let metadata = fs::symlink_metadata(&dir)?;
-        let candidate = Candidate { path: &dir, file_type: metadata.file_type() };
+        let candidate = Candidate {
+            path: &dir,
+            file_type: metadata.file_type(),
+        };
         let action = plan_entry(&candidate, &engine());
 
         assert!(action.apply_ignore, "node_modules must be marked");
@@ -438,11 +453,7 @@ mod tests {
 
     #[test]
     fn apply_all_visits_every_path_despite_failures() {
-        let paths = vec![
-            PathBuf::from("a"),
-            PathBuf::from("b"),
-            PathBuf::from("c"),
-        ];
+        let paths = vec![PathBuf::from("a"), PathBuf::from("b"), PathBuf::from("c")];
         let mut seen = Vec::new();
         let failures = apply_all(&paths, |p| {
             seen.push(p.to_path_buf());
@@ -453,7 +464,10 @@ mod tests {
         });
 
         assert_eq!(failures, 1, "the single failing path should be counted");
-        assert_eq!(seen, paths, "every path must be visited even after a failure");
+        assert_eq!(
+            seen, paths,
+            "every path must be visited even after a failure"
+        );
     }
 
     #[test]
@@ -477,8 +491,14 @@ mod tests {
         apply_discovered_paths(second, true, &mut watcher, &mut registry)?;
         let after_second = registry.watched_count();
 
-        assert_eq!(after_first, after_second, "re-scan must not add duplicate watches");
-        assert!(after_first >= 3, "root + a + a/b should be watched, node_modules skipped");
+        assert_eq!(
+            after_first, after_second,
+            "re-scan must not add duplicate watches"
+        );
+        assert!(
+            after_first >= 3,
+            "root + a + a/b should be watched, node_modules skipped"
+        );
         Ok(())
     }
 
@@ -509,8 +529,14 @@ mod tests {
 
         rescan_subtree(temp.path(), true, &mut watcher, &mut registry, &rules)?;
 
-        assert!(!registry.contains_path(&ghost), "stale entry must be pruned");
-        assert!(registry.contains_path(temp.path()), "root must be re-watched");
+        assert!(
+            !registry.contains_path(&ghost),
+            "stale entry must be pruned"
+        );
+        assert!(
+            registry.contains_path(temp.path()),
+            "root must be re-watched"
+        );
         assert!(
             registry.contains_path(&temp.path().join("a")),
             "a must be re-watched"
@@ -547,7 +573,10 @@ mod tests {
         // watched.
         let discovered = discover_watch_targets(&proj, &rules)?;
         apply_discovered_paths(discovered, true, &mut watcher, &mut registry)?;
-        assert!(registry.contains_path(&target), "target watched pre-trigger");
+        assert!(
+            registry.contains_path(&target),
+            "target watched pre-trigger"
+        );
         assert!(
             registry.contains_path(&target_debug),
             "target/debug watched pre-trigger"
@@ -557,7 +586,10 @@ mod tests {
         fs::write(proj.join("Cargo.toml"), b"[package]\nname=\"demo\"")?;
         rescan_subtree(&proj, true, &mut watcher, &mut registry, &rules)?;
 
-        assert!(!registry.contains_path(&target), "matched target must not be watched");
+        assert!(
+            !registry.contains_path(&target),
+            "matched target must not be watched"
+        );
         assert!(
             !registry.contains_path(&target_debug),
             "target subtree must be pruned"
@@ -586,9 +618,18 @@ mod tests {
 
         rescan_subtree(&proj_a, true, &mut watcher, &mut registry, &rules)?;
 
-        assert!(registry.contains_path(&a_inner), "in-scope descendant re-added");
-        assert!(registry.contains_path(&proj_b), "out-of-scope project untouched");
-        assert!(registry.contains_path(&b_inner), "out-of-scope descendant untouched");
+        assert!(
+            registry.contains_path(&a_inner),
+            "in-scope descendant re-added"
+        );
+        assert!(
+            registry.contains_path(&proj_b),
+            "out-of-scope project untouched"
+        );
+        assert!(
+            registry.contains_path(&b_inner),
+            "out-of-scope descendant untouched"
+        );
         Ok(())
     }
 
@@ -607,7 +648,10 @@ mod tests {
         // deliver CREATE events for children made below.
         let initial = discover_watch_targets(&root, &rules)?;
         apply_discovered_paths(initial, true, &mut watcher, &mut registry)?;
-        assert!(registry.contains_path(&root), "root must be watched after seeding");
+        assert!(
+            registry.contains_path(&root),
+            "root must be watched after seeding"
+        );
 
         // Create entries *after* watching so they arrive through the event path.
         // node_modules is created first so its CREATE event is drained no later
@@ -652,8 +696,9 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&shutdown);
         let root_for_thread = root.clone();
-        let handle =
-            thread::spawn(move || event_loop(root_for_thread, true, watcher, registry, rules, flag));
+        let handle = thread::spawn(move || {
+            event_loop(root_for_thread, true, watcher, registry, rules, flag)
+        });
 
         // Let the loop reach its poll wait, then request shutdown.
         thread::sleep(Duration::from_millis(50));
@@ -688,7 +733,10 @@ mod tests {
         let rules = RuleEngine::new(vec![Box::new(EggInfoRule)]);
         let action = plan_entry(&candidate, &rules);
 
-        assert!(action.apply_ignore, "matched *.egg-info file must be marked");
+        assert!(
+            action.apply_ignore,
+            "matched *.egg-info file must be marked"
+        );
         assert!(!action.watch_dir, "a non-directory must not be watched");
         Ok(())
     }

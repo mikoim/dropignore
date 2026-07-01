@@ -33,4 +33,8 @@ cargo test
 ```
 
 ## Extending rules
-Add a new type implementing the `Rule` trait in `src/rules.rs`, return the desired `MatchAction`, and register it in the `RuleEngine::new` call in `src/app.rs`. The existing rules serve as templates.
+For a new "ignore directories with these exact names" rule, add the name to an
+existing `ArtifactDirsRule` list in `src/rules.rs` (or add a new associated
+constant) and register it in `RuleEngine::new` in `src/app.rs`. For
+conditional rules, implement the `Rule` trait; `RustTargetRule` is the
+template.

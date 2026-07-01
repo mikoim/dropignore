@@ -156,8 +156,14 @@ mod tests {
     #[test]
     fn watch_mask_includes_move_and_delete_self() {
         let mask = watch_mask();
-        assert!(mask.contains(WatchMask::MOVE_SELF), "MOVE_SELF must be watched");
-        assert!(mask.contains(WatchMask::DELETE_SELF), "DELETE_SELF must be watched");
+        assert!(
+            mask.contains(WatchMask::MOVE_SELF),
+            "MOVE_SELF must be watched"
+        );
+        assert!(
+            mask.contains(WatchMask::DELETE_SELF),
+            "DELETE_SELF must be watched"
+        );
     }
 
     #[test]
@@ -170,11 +176,21 @@ mod tests {
         registry.insert(temp.path().to_path_buf(), descriptor.clone());
 
         assert!(registry.contains_path(temp.path()));
-        assert_eq!(registry.path_for(&descriptor), Some(&temp.path().to_path_buf()));
+        assert_eq!(
+            registry.path_for(&descriptor),
+            Some(&temp.path().to_path_buf())
+        );
 
         registry.remove_by_descriptor(&descriptor);
-        assert!(!registry.contains_path(temp.path()), "path mapping must be gone");
-        assert_eq!(registry.path_for(&descriptor), None, "descriptor mapping must be gone");
+        assert!(
+            !registry.contains_path(temp.path()),
+            "path mapping must be gone"
+        );
+        assert_eq!(
+            registry.path_for(&descriptor),
+            None,
+            "descriptor mapping must be gone"
+        );
         Ok(())
     }
 
@@ -207,7 +223,10 @@ mod tests {
         // still-watched inode): the old inverse mapping must not linger.
         registry.insert(new_path.clone(), descriptor.clone());
 
-        assert!(!registry.contains_path(&old_path), "stale path must be evicted");
+        assert!(
+            !registry.contains_path(&old_path),
+            "stale path must be evicted"
+        );
         assert!(registry.contains_path(&new_path));
         assert_eq!(registry.path_for(&descriptor), Some(&new_path));
         Ok(())
@@ -297,7 +316,11 @@ mod tests {
 
         let drained = registry.drain_subtree(temp.path());
         assert_eq!(drained.len(), 3, "every descriptor returned");
-        assert_eq!(registry.watched_count(), 0, "registry empty after root drain");
+        assert_eq!(
+            registry.watched_count(),
+            0,
+            "registry empty after root drain"
+        );
         Ok(())
     }
 }
