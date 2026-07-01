@@ -32,7 +32,10 @@ pub(crate) fn discover_watch_targets(start: &Path, rules: &RuleEngine) -> Result
             metadata: &metadata,
         };
 
-        if let Some(action) = rules.evaluate_action(&candidate) {
+        if let Some(matched) = rules.evaluate(&candidate) {
+            matched.log_matched(&dir);
+            let action = matched.action;
+
             if action.set_dropbox_ignore {
                 discovered.matches.push(dir.clone());
             }

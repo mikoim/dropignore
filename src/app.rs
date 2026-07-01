@@ -53,9 +53,10 @@ fn plan_entry(candidate: &Candidate<'_>, rules: &RuleEngine) -> EntryAction {
 
     let mut apply_ignore = false;
     let mut skip_descendants = false;
-    if let Some(action) = rules.evaluate_action(candidate) {
-        apply_ignore = action.set_dropbox_ignore;
-        skip_descendants = action.skip_descendants;
+    if let Some(matched) = rules.evaluate(candidate) {
+        matched.log_matched(candidate.path);
+        apply_ignore = matched.action.set_dropbox_ignore;
+        skip_descendants = matched.action.skip_descendants;
     }
 
     EntryAction {
