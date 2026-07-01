@@ -88,6 +88,13 @@ impl WatchRegistry {
     pub(crate) fn contains_path(&self, path: &Path) -> bool {
         self.by_path.contains_key(path)
     }
+
+    /// Number of distinct paths currently watched. Used to assert re-scan
+    /// idempotency in tests.
+    #[allow(dead_code)]
+    pub(crate) fn watched_count(&self) -> usize {
+        self.by_path.len()
+    }
 }
 
 #[cfg(test)]
