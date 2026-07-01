@@ -95,12 +95,24 @@ impl WatchRegistry {
     pub(crate) fn watched_count(&self) -> usize {
         self.by_path.len()
     }
+
+    /// Drop all bookkeeping and return the descriptors so the caller can
+    /// remove them from the kernel. Used by overflow recovery to rebuild the
+    /// watch set from scratch.
+    pub(crate) fn drain_descriptors(&mut self) -> Vec<WatchDescriptor> {
+        self.by_path.clear();
+        self.by_descriptor
+            .drain()
+            .map(|(descriptor, _)| descriptor)
+            .collect()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use anyhow::Result;
+    use std::fs;
     use tempfile::TempDir;
 
     #[test]
@@ -160,6 +172,29 @@ mod tests {
         assert!(!registry.contains_path(&old_path), "stale path must be evicted");
         assert!(registry.contains_path(&new_path));
         assert_eq!(registry.path_for(&descriptor), Some(&new_path));
+        Ok(())
+    }
+
+    #[test]
+    fn drain_descriptors_empties_registry_and_returns_all() -> Result<()> {
+        let temp = TempDir::new()?;
+        let dir_a = temp.path().join("a");
+        let dir_b = temp.path().join("b");
+        fs::create_dir(&dir_a)?;
+        fs::create_dir(&dir_b)?;
+
+        let inotify = Inotify::init()?;
+        let wd_a = inotify.watches().add(&dir_a, watch_mask())?;
+        let wd_b = inotify.watches().add(&dir_b, watch_mask())?;
+
+        let mut registry = WatchRegistry::default();
+        registry.insert(dir_a, wd_a);
+        registry.insert(dir_b, wd_b);
+        assert_eq!(registry.watched_count(), 2);
+
+        let drained = registry.drain_descriptors();
+        assert_eq!(drained.len(), 2, "every descriptor must be returned");
+        assert_eq!(registry.watched_count(), 0, "registry must be empty after drain");
         Ok(())
     }
 }
