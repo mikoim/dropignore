@@ -96,6 +96,31 @@ impl WatchRegistry {
         self.by_path.len()
     }
 
+    /// Drop bookkeeping for every watched path at or under `prefix` (inclusive)
+    /// and return their descriptors so the caller can remove them from the
+    /// kernel. Rebuilds a bounded portion of the watch set: a trigger's parent
+    /// subtree, or the whole tree when `prefix` is the watched root.
+    ///
+    /// `Path::starts_with` compares whole components, so `/a/bc` is not a child
+    /// of `/a/b`; it also returns true for equality, so `prefix` itself drains.
+    #[allow(dead_code)]
+    pub(crate) fn drain_subtree(&mut self, prefix: &Path) -> Vec<WatchDescriptor> {
+        let paths: Vec<PathBuf> = self
+            .by_path
+            .keys()
+            .filter(|path| path.starts_with(prefix))
+            .cloned()
+            .collect();
+        let mut descriptors = Vec::with_capacity(paths.len());
+        for path in paths {
+            if let Some(descriptor) = self.by_path.remove(&path) {
+                self.by_descriptor.remove(&descriptor);
+                descriptors.push(descriptor);
+            }
+        }
+        descriptors
+    }
+
     /// Drop all bookkeeping and return the descriptors so the caller can
     /// remove them from the kernel. Used by overflow recovery to rebuild the
     /// watch set from scratch.
@@ -195,6 +220,94 @@ mod tests {
         let drained = registry.drain_descriptors();
         assert_eq!(drained.len(), 2, "every descriptor must be returned");
         assert_eq!(registry.watched_count(), 0, "registry must be empty after drain");
+        Ok(())
+    }
+
+    #[test]
+    fn drain_subtree_removes_prefix_and_descendants_only() -> Result<()> {
+        use std::collections::HashSet;
+        let temp = TempDir::new()?;
+        let root = temp.path();
+        let a = root.join("a");
+        let a_b = a.join("b");
+        let c = root.join("c");
+        fs::create_dir(&a)?;
+        fs::create_dir(&a_b)?;
+        fs::create_dir(&c)?;
+
+        let inotify = Inotify::init()?;
+        let wd_root = inotify.watches().add(root, watch_mask())?;
+        let wd_a = inotify.watches().add(&a, watch_mask())?;
+        let wd_a_b = inotify.watches().add(&a_b, watch_mask())?;
+        let wd_c = inotify.watches().add(&c, watch_mask())?;
+
+        let mut registry = WatchRegistry::default();
+        registry.insert(root.to_path_buf(), wd_root);
+        registry.insert(a.clone(), wd_a.clone());
+        registry.insert(a_b.clone(), wd_a_b.clone());
+        registry.insert(c.clone(), wd_c);
+
+        let drained: HashSet<_> = registry.drain_subtree(&a).into_iter().collect();
+        let expected: HashSet<_> = [wd_a, wd_a_b].into_iter().collect();
+        assert_eq!(drained, expected, "only a and a/b descriptors returned");
+
+        assert!(!registry.contains_path(&a), "a removed");
+        assert!(!registry.contains_path(&a_b), "a/b removed");
+        assert!(registry.contains_path(root), "root retained");
+        assert!(registry.contains_path(&c), "sibling c retained");
+        Ok(())
+    }
+
+    #[test]
+    fn drain_subtree_respects_component_boundaries() -> Result<()> {
+        let temp = TempDir::new()?;
+        let a = temp.path().join("a");
+        let a_b = a.join("b");
+        let a_bc = a.join("bc");
+        fs::create_dir(&a)?;
+        fs::create_dir(&a_b)?;
+        fs::create_dir(&a_bc)?;
+
+        let inotify = Inotify::init()?;
+        let wd_a_b = inotify.watches().add(&a_b, watch_mask())?;
+        let wd_a_bc = inotify.watches().add(&a_bc, watch_mask())?;
+
+        let mut registry = WatchRegistry::default();
+        registry.insert(a_b.clone(), wd_a_b);
+        registry.insert(a_bc.clone(), wd_a_bc);
+
+        let drained = registry.drain_subtree(&a_b);
+        assert_eq!(drained.len(), 1, "only a/b drained");
+        assert!(!registry.contains_path(&a_b));
+        assert!(
+            registry.contains_path(&a_bc),
+            "a/bc must NOT be treated as a child of a/b"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn drain_subtree_with_root_prefix_empties_registry() -> Result<()> {
+        let temp = TempDir::new()?;
+        let dir_a = temp.path().join("a");
+        let dir_b = temp.path().join("b");
+        fs::create_dir(&dir_a)?;
+        fs::create_dir(&dir_b)?;
+
+        let inotify = Inotify::init()?;
+        let wd_root = inotify.watches().add(temp.path(), watch_mask())?;
+        let wd_a = inotify.watches().add(&dir_a, watch_mask())?;
+        let wd_b = inotify.watches().add(&dir_b, watch_mask())?;
+
+        let mut registry = WatchRegistry::default();
+        registry.insert(temp.path().to_path_buf(), wd_root);
+        registry.insert(dir_a, wd_a);
+        registry.insert(dir_b, wd_b);
+        assert_eq!(registry.watched_count(), 3);
+
+        let drained = registry.drain_subtree(temp.path());
+        assert_eq!(drained.len(), 3, "every descriptor returned");
+        assert_eq!(registry.watched_count(), 0, "registry empty after root drain");
         Ok(())
     }
 }
