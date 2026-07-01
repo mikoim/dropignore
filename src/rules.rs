@@ -14,6 +14,10 @@ impl Candidate<'_> {
         self.metadata.is_dir()
     }
 
+    pub(crate) fn is_symlink(&self) -> bool {
+        self.metadata.file_type().is_symlink()
+    }
+
     pub(crate) fn is_dir_named(&self, name: &str) -> bool {
         self.is_dir() && self.path.file_name().is_some_and(|entry| entry == name)
     }
