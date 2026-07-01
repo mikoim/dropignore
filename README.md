@@ -25,6 +25,7 @@ RUST_LOG=debug cargo run -- --dry-run /home/foo/Dropbox
 1. Seeds watches for all traversable subdirectories under the root, skipping any directory matched by a rule.
 2. Applies `user.com.dropbox.ignored=1` to any matched path (or logs in dry-run).
 3. Listens for create/move-in events and processes new paths, adding watches for newly discovered directories unless a rule says to skip descendants.
+4. Skips symlinks (matching the initial walk) and, if the inotify event queue overflows, re-scans from the root so dropped events cannot leave paths unmarked.
 
 ## Testing
 ```bash
