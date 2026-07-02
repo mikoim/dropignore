@@ -1,5 +1,5 @@
 use crate::cli::CliArgs;
-use crate::discovery::{DiscoveredPaths, discover_watch_targets};
+use crate::discovery::{DiscoveredPaths, discover_matches, discover_watch_targets};
 use crate::dropbox::apply_dropbox_ignore;
 use crate::rules::{ArtifactDirsRule, Candidate, EggInfoRule, MarkedBuildDirRule, RuleEngine};
 use crate::watch::{WatchRegistry, add_watch};
@@ -63,17 +63,17 @@ pub(crate) fn run(args: CliArgs) -> Result<()> {
     Ok(())
 }
 
-/// Walk the tree once, apply `apply` to every rule match, and return. Watch
-/// targets from discovery are ignored: nothing is registered with inotify.
-/// Fails when at least one matched path could not be marked, so cron/systemd
-/// sees a non-zero exit code.
+/// Walk the tree once, apply `apply` to every rule match, and return. Watcher
+/// collection is skipped entirely (`discover_matches`): nothing is registered
+/// with inotify. Fails when at least one matched path could not be marked, so
+/// cron/systemd sees a non-zero exit code.
 fn scan_once<F>(root: &Path, rules: &RuleEngine, apply: F) -> Result<()>
 where
     F: FnMut(&Path) -> Result<()>,
 {
-    let discovered = discover_watch_targets(root, rules)?;
-    let total = discovered.matches.len();
-    let failures = apply_all(&discovered.matches, apply);
+    let matches = discover_matches(root, rules)?;
+    let total = matches.len();
+    let failures = apply_all(&matches, apply);
     if failures > 0 {
         anyhow::bail!("Failed to mark {failures} of {total} matched path(s)");
     }
