@@ -1149,4 +1149,51 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn drain_events_errors_when_root_vanishes_during_overflow() -> Result<()> {
+        use std::thread::sleep;
+        use std::time::{Duration, Instant};
+
+        let max: usize = fs::read_to_string("/proc/sys/fs/inotify/max_queued_events")?
+            .trim()
+            .parse()?;
+        if max > 65536 {
+            eprintln!("skipping: max_queued_events={max} is too large to overflow in a test");
+            return Ok(());
+        }
+
+        let temp = TempDir::new()?;
+        let root = temp.path().join("root");
+        fs::create_dir(&root)?;
+
+        let rules = engine();
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+        let initial = discover_watch_targets(&root, &rules)?;
+        apply_discovered_paths(initial, true, &mut watcher, &mut registry)?;
+
+        // Fill the kernel queue without draining so it genuinely overflows.
+        for i in 0..(max + 100) {
+            fs::write(root.join(format!("f{i}")), b"")?;
+        }
+
+        // The queue is still full, so the root's DELETE_SELF is dropped too;
+        // only the overflow rescan can notice the root is gone.
+        fs::remove_dir_all(&root)?;
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut outcome = Ok(());
+        while Instant::now() < deadline && outcome.is_ok() {
+            outcome = drain_events(&mut watcher, &mut registry, &rules, &root, true);
+            sleep(Duration::from_millis(20));
+        }
+
+        let err = outcome.expect_err("vanished root must surface an error after overflow");
+        assert!(
+            err.to_string().contains("disappeared during overflow rescan"),
+            "got: {err}"
+        );
+        Ok(())
+    }
 }
