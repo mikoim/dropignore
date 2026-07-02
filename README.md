@@ -35,6 +35,21 @@ Logs default to `info`. Override with `RUST_LOG`, e.g.:
 RUST_LOG=debug cargo run -- --dry-run /home/foo/Dropbox
 ```
 
+## Running as a service
+Watch mode exits non-zero when the watched root is moved or deleted, so it
+is designed to run under a supervisor. A systemd user unit is provided:
+
+```bash
+cp contrib/dropignore.service ~/.config/systemd/user/
+# Edit ExecStart if your binary or Dropbox directory lives elsewhere.
+systemctl --user daemon-reload
+systemctl --user enable --now dropignore
+```
+
+Follow logs with `journalctl --user -u dropignore -f`. For very large
+trees, raise the inotify watch limit
+(`/proc/sys/fs/inotify/max_user_watches`).
+
 ## How it works
 1. Seeds watches for all traversable subdirectories under the root, skipping any directory matched by a rule, and marks any rule-matching file or directory that already exists (e.g. a pre-existing `*.egg-info`).
 2. Applies `user.com.dropbox.ignored=1` to any matched path (or logs in dry-run).
