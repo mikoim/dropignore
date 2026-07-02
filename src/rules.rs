@@ -68,8 +68,8 @@ pub(crate) trait Rule: Send + Sync {
     ///
     /// Scope invariant: a trigger is assumed to affect verdicts only within the
     /// trigger file's own directory subtree, so a scoped rescan fully
-    /// reconciles it. `RustTargetRule` satisfies this — it consults a sibling
-    /// `Cargo.toml`. A rule whose trigger has non-local effects would need a
+    /// reconciles it. `MarkedBuildDirRule` satisfies this — it consults a sibling
+    /// marker file. A rule whose trigger has non-local effects would need a
     /// wider rescan scope than the event loop currently uses.
     fn triggers(&self) -> &'static [&'static str] {
         &[]
@@ -113,29 +113,60 @@ impl RuleEngine {
     }
 }
 
-/// Rule that matches the Rust build output directory `target` when a `Cargo.toml`
-/// exists in the same parent directory. This ensures we only ignore build artifacts
-/// for actual Cargo projects.
-pub(crate) struct RustTargetRule;
+/// Rule matching a build output directory only when a marker file exists in
+/// the same parent directory, so generic names like `target` or `build` are
+/// ignored only inside real projects. The markers double as `triggers()`:
+/// creating one schedules a scoped rescan that reconciles a pre-existing
+/// build directory (see `Rule::triggers`).
+pub(crate) struct MarkedBuildDirRule {
+    name: &'static str,
+    dir: &'static str,
+    markers: &'static [&'static str],
+}
 
-impl Rule for RustTargetRule {
+impl MarkedBuildDirRule {
+    pub(crate) const CARGO_TARGET: Self = Self {
+        name: "Cargo target directory",
+        dir: "target",
+        markers: &["Cargo.toml"],
+    };
+
+    pub(crate) const MAVEN_TARGET: Self = Self {
+        name: "Maven target directory",
+        dir: "target",
+        markers: &["pom.xml"],
+    };
+
+    pub(crate) const GRADLE_BUILD: Self = Self {
+        name: "Gradle build directory",
+        dir: "build",
+        markers: &[
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+        ],
+    };
+}
+
+impl Rule for MarkedBuildDirRule {
     fn name(&self) -> &'static str {
-        "Cargo target directory"
+        self.name
     }
 
     fn matches(&self, candidate: &Candidate<'_>) -> bool {
         // Check the directory name first to avoid unnecessary filesystem operations.
-        if !candidate.is_dir_named("target") {
+        if !candidate.is_dir_named(self.dir) {
             return false;
         }
 
-        // Ensure the parent contains a Cargo.toml so we only target Rust projects.
+        // Ensure the parent contains a marker file so we only match real projects.
         let Some(parent) = candidate.path.parent() else {
             return false;
         };
-
-        let cargo_toml = parent.join("Cargo.toml");
-        cargo_toml.exists()
+        self.markers
+            .iter()
+            .any(|marker| parent.join(marker).exists())
     }
 
     fn action(&self) -> MatchAction {
@@ -143,7 +174,7 @@ impl Rule for RustTargetRule {
     }
 
     fn triggers(&self) -> &'static [&'static str] {
-        &["Cargo.toml"]
+        self.markers
     }
 }
 
@@ -161,9 +192,18 @@ const PYTHON_ARTIFACT_DIRS: &[&str] = &[
 ];
 
 /// JavaScript framework build output and tool cache directories matched by
-/// exact name. Each is reproducible and never holds user source. `.turbo` is
-/// Turborepo's local cache (verified against its docs).
-const JS_ARTIFACT_DIRS: &[&str] = &[".next", ".nuxt", ".turbo", ".parcel-cache"];
+/// exact name. Each is a framework- or tool-owned reproducible cache that
+/// never holds user source.
+const JS_ARTIFACT_DIRS: &[&str] = &[
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".parcel-cache",
+    ".svelte-kit",
+    ".astro",
+    ".angular",
+    ".vite",
+];
 
 /// Rule matching directories whose exact name is in a fixed list. This is the
 /// common "tool-owned artifact directory" shape; every instance marks the
@@ -190,6 +230,27 @@ impl ArtifactDirsRule {
     pub(crate) const JS_BUILD: Self = Self {
         name: "JavaScript build/cache directory",
         dirs: JS_ARTIFACT_DIRS,
+    };
+    /// Project-local Gradle cache. The guarded `build` output lives in
+    /// `MarkedBuildDirRule::GRADLE_BUILD`; `.gradle` is unconditional because
+    /// a directory with this exact name is Gradle-owned in practice and
+    /// marking is non-destructive (sync exclusion only).
+    pub(crate) const JVM_CACHES: Self = Self {
+        name: "Gradle cache directory",
+        dirs: &[".gradle"],
+    };
+    /// IaC tool caches: `.terraform` holds provider/module downloads
+    /// recreated by `terraform init`; `.terragrunt-cache` is Terragrunt's
+    /// working copy.
+    pub(crate) const IAC_CACHES: Self = Self {
+        name: "IaC cache directory",
+        dirs: &[".terraform", ".terragrunt-cache"],
+    };
+    /// Dev-environment state dirs: `.direnv` is direnv's layout/cache dir,
+    /// `.devenv` is devenv's local state; both are regenerated on demand.
+    pub(crate) const DEV_ENV_DIRS: Self = Self {
+        name: "development environment directory",
+        dirs: &[".direnv", ".devenv"],
     };
 }
 
@@ -289,11 +350,10 @@ mod tests {
     }
 
     #[test]
-    fn rust_target_rule_requires_cargo_toml_in_parent() -> Result<()> {
+    fn cargo_target_rule_requires_cargo_toml_in_parent() -> Result<()> {
         let temp = TempDir::new().context("Failed to create temp dir")?;
         let project_root = temp.path();
-        let cargo_toml = project_root.join("Cargo.toml");
-        fs::write(&cargo_toml, b"[package]\nname=\"demo\"")?;
+        fs::write(project_root.join("Cargo.toml"), b"[package]\nname=\"demo\"")?;
 
         let target_dir = project_root.join("target");
         fs::create_dir(&target_dir)?;
@@ -304,7 +364,7 @@ mod tests {
             file_type: metadata.file_type(),
         };
         let engine = RuleEngine::new(vec![
-            Box::new(RustTargetRule),
+            Box::new(MarkedBuildDirRule::CARGO_TARGET),
             Box::new(ArtifactDirsRule::NODE_MODULES),
         ]);
 
@@ -315,6 +375,24 @@ mod tests {
         assert_eq!(result.name, "Cargo target directory");
         assert!(result.action.set_dropbox_ignore);
         assert!(result.action.skip_descendants);
+        Ok(())
+    }
+
+    #[test]
+    fn cargo_target_rule_ignores_target_without_cargo_toml() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let target_dir = temp.path().join("target");
+        fs::create_dir(&target_dir)?;
+
+        let metadata = fs::metadata(&target_dir)?;
+        let candidate = Candidate {
+            path: &target_dir,
+            file_type: metadata.file_type(),
+        };
+        assert!(
+            !MarkedBuildDirRule::CARGO_TARGET.matches(&candidate),
+            "target without a sibling Cargo.toml must not match"
+        );
         Ok(())
     }
 
@@ -355,15 +433,67 @@ mod tests {
     }
 
     #[test]
-    fn rust_target_rule_declares_cargo_toml_trigger() {
-        assert_eq!(RustTargetRule.triggers(), &["Cargo.toml"]);
+    fn cargo_target_rule_declares_cargo_toml_trigger() {
+        assert_eq!(MarkedBuildDirRule::CARGO_TARGET.triggers(), &["Cargo.toml"]);
     }
 
     #[test]
     fn rule_engine_recognizes_cargo_toml_trigger() {
-        let engine = RuleEngine::new(vec![Box::new(RustTargetRule)]);
+        let engine = RuleEngine::new(vec![Box::new(MarkedBuildDirRule::CARGO_TARGET)]);
         assert!(engine.is_trigger(OsStr::new("Cargo.toml")));
         assert!(!engine.is_trigger(OsStr::new("package.json")));
+    }
+
+    #[test]
+    fn maven_target_rule_requires_pom_xml_in_parent() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        fs::write(temp.path().join("pom.xml"), b"<project/>")?;
+        let target_dir = temp.path().join("target");
+        fs::create_dir(&target_dir)?;
+
+        let metadata = fs::metadata(&target_dir)?;
+        let candidate = Candidate {
+            path: &target_dir,
+            file_type: metadata.file_type(),
+        };
+        assert_eq!(
+            MarkedBuildDirRule::MAVEN_TARGET.name(),
+            "Maven target directory"
+        );
+        assert!(
+            MarkedBuildDirRule::MAVEN_TARGET.matches(&candidate),
+            "target with a sibling pom.xml must match"
+        );
+        assert_eq!(
+            MarkedBuildDirRule::MAVEN_TARGET.action(),
+            MatchAction::IGNORE_AND_SKIP
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn maven_target_rule_ignores_target_without_pom_xml() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let target_dir = temp.path().join("target");
+        fs::create_dir(&target_dir)?;
+
+        let metadata = fs::metadata(&target_dir)?;
+        let candidate = Candidate {
+            path: &target_dir,
+            file_type: metadata.file_type(),
+        };
+        assert!(
+            !MarkedBuildDirRule::MAVEN_TARGET.matches(&candidate),
+            "target without a sibling pom.xml must not match"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rule_engine_recognizes_pom_xml_trigger() {
+        let engine = RuleEngine::new(vec![Box::new(MarkedBuildDirRule::MAVEN_TARGET)]);
+        assert!(engine.is_trigger(OsStr::new("pom.xml")));
+        assert!(!engine.is_trigger(OsStr::new("Cargo.toml")));
     }
 
     #[test]
@@ -423,7 +553,16 @@ mod tests {
         let temp = TempDir::new().context("Failed to create temp dir")?;
         let engine = RuleEngine::new(vec![Box::new(ArtifactDirsRule::JS_BUILD)]);
 
-        for name in [".next", ".nuxt", ".turbo", ".parcel-cache"] {
+        for name in [
+            ".next",
+            ".nuxt",
+            ".turbo",
+            ".parcel-cache",
+            ".svelte-kit",
+            ".astro",
+            ".angular",
+            ".vite",
+        ] {
             let dir = temp.path().join(name);
             fs::create_dir(&dir)?;
             let meta = fs::metadata(&dir)?;
@@ -467,6 +606,21 @@ mod tests {
                 &ArtifactDirsRule::JS_BUILD,
                 ".next",
                 "JavaScript build/cache directory",
+            ),
+            (
+                &ArtifactDirsRule::JVM_CACHES,
+                ".gradle",
+                "Gradle cache directory",
+            ),
+            (
+                &ArtifactDirsRule::IAC_CACHES,
+                ".terraform",
+                "IaC cache directory",
+            ),
+            (
+                &ArtifactDirsRule::DEV_ENV_DIRS,
+                ".direnv",
+                "development environment directory",
             ),
         ];
 
@@ -546,6 +700,92 @@ mod tests {
             EggInfoRule.matches(&candidate),
             "an .egg-info suffix must match even when the name has non-UTF-8 bytes"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn gradle_build_rule_matches_with_each_marker() -> Result<()> {
+        for marker in [
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+        ] {
+            let temp = TempDir::new().context("Failed to create temp dir")?;
+            fs::write(temp.path().join(marker), b"")?;
+            let build_dir = temp.path().join("build");
+            fs::create_dir(&build_dir)?;
+
+            let metadata = fs::metadata(&build_dir)?;
+            let candidate = Candidate {
+                path: &build_dir,
+                file_type: metadata.file_type(),
+            };
+            assert!(
+                MarkedBuildDirRule::GRADLE_BUILD.matches(&candidate),
+                "build with sibling {marker} must match"
+            );
+        }
+        assert_eq!(
+            MarkedBuildDirRule::GRADLE_BUILD.name(),
+            "Gradle build directory"
+        );
+        assert_eq!(
+            MarkedBuildDirRule::GRADLE_BUILD.action(),
+            MatchAction::IGNORE_AND_SKIP
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gradle_build_rule_ignores_build_without_marker() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let build_dir = temp.path().join("build");
+        fs::create_dir(&build_dir)?;
+
+        let metadata = fs::metadata(&build_dir)?;
+        let candidate = Candidate {
+            path: &build_dir,
+            file_type: metadata.file_type(),
+        };
+        assert!(
+            !MarkedBuildDirRule::GRADLE_BUILD.matches(&candidate),
+            "build without a Gradle script sibling must not match"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rule_engine_recognizes_gradle_triggers() {
+        let engine = RuleEngine::new(vec![Box::new(MarkedBuildDirRule::GRADLE_BUILD)]);
+        for trigger in [
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+        ] {
+            assert!(engine.is_trigger(OsStr::new(trigger)), "{trigger}");
+        }
+        assert!(!engine.is_trigger(OsStr::new("pom.xml")));
+    }
+
+    #[test]
+    fn iac_and_env_rules_match_all_listed_dirs() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let cases: &[(&ArtifactDirsRule, &str)] = &[
+            (&ArtifactDirsRule::IAC_CACHES, ".terragrunt-cache"),
+            (&ArtifactDirsRule::DEV_ENV_DIRS, ".devenv"),
+        ];
+        for (rule, name) in cases {
+            let dir = temp.path().join(name);
+            fs::create_dir(&dir)?;
+            let meta = fs::metadata(&dir)?;
+            let candidate = Candidate {
+                path: &dir,
+                file_type: meta.file_type(),
+            };
+            assert!(rule.matches(&candidate), "{name} should match");
+        }
         Ok(())
     }
 }

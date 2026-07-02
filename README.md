@@ -4,7 +4,7 @@ CLI tool that watches a directory with inotify and marks matching paths with Dro
 
 ## Features
 - Recursive watch starting at a user-specified root, using dynamic inotify registrations.
-- Rule-based matching (currently: `node_modules`, pnpm `.pnpm-store`, Cargo `target` with adjacent `Cargo.toml`, Python virtualenvs `venv`/`.venv`, `*.egg-info`, Python tool caches `__pycache__`/`.pytest_cache`/`.mypy_cache`/`.ruff_cache`/`.tox`, and JS build/cache dirs `.next`/`.nuxt`/`.turbo`/`.parcel-cache`).
+- Rule-based matching (currently: `node_modules`, pnpm `.pnpm-store`, Cargo/Maven `target` with an adjacent `Cargo.toml`/`pom.xml`, Gradle `build` with an adjacent Gradle build/settings script, Gradle cache `.gradle`, Python virtualenvs `venv`/`.venv`, `*.egg-info`, Python tool caches `__pycache__`/`.pytest_cache`/`.mypy_cache`/`.ruff_cache`/`.tox`, JS build/cache dirs `.next`/`.nuxt`/`.turbo`/`.parcel-cache`/`.svelte-kit`/`.astro`/`.angular`/`.vite`, IaC caches `.terraform`/`.terragrunt-cache`, and dev-environment dirs `.direnv`/`.devenv`).
 - Skips descending into ignored subtrees to avoid unnecessary watches.
 - Dry-run mode logs intended actions without calling `setxattr`.
 - Detailed logging via `env_logger`.
@@ -35,6 +35,8 @@ cargo test
 ## Extending rules
 For a new "ignore directories with these exact names" rule, add the name to an
 existing `ArtifactDirsRule` list in `src/rules.rs` (or add a new associated
-constant) and register it in `RuleEngine::new` in `src/app.rs`. For
-conditional rules, implement the `Rule` trait; `RustTargetRule` is the
-template.
+constant). For a build directory that should only match next to a project
+marker file (like Cargo's `target` next to `Cargo.toml`), add a
+`MarkedBuildDirRule` constant; its markers automatically become rescan
+triggers. Register new constants in `RuleEngine::new` in `src/app.rs`. For
+anything else, implement the `Rule` trait directly.

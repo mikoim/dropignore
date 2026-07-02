@@ -110,7 +110,7 @@ pub(crate) fn discover_watch_targets(start: &Path, rules: &RuleEngine) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::{ArtifactDirsRule, EggInfoRule, RuleEngine, RustTargetRule};
+    use crate::rules::{ArtifactDirsRule, EggInfoRule, MarkedBuildDirRule, RuleEngine};
     use anyhow::{Context, Result};
     use std::fs;
     use tempfile::TempDir;
@@ -163,7 +163,7 @@ mod tests {
         fs::create_dir(&nested_dir)?;
 
         let engine = RuleEngine::new(vec![
-            Box::new(RustTargetRule),
+            Box::new(MarkedBuildDirRule::CARGO_TARGET),
             Box::new(ArtifactDirsRule::NODE_MODULES),
         ]);
         let discovered = discover_watch_targets(cargo_root, &engine)?;
