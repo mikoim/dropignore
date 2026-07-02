@@ -35,6 +35,12 @@ pub(crate) fn run(args: CliArgs) -> Result<()> {
         Box::new(ArtifactDirsRule::JVM_CACHES),
         Box::new(ArtifactDirsRule::IAC_CACHES),
         Box::new(ArtifactDirsRule::DEV_ENV_DIRS),
+        Box::new(MarkedBuildDirRule::COMPOSER_VENDOR),
+        Box::new(MarkedBuildDirRule::MIX_BUILD),
+        Box::new(MarkedBuildDirRule::MIX_DEPS),
+        Box::new(MarkedBuildDirRule::ZIG_OUT),
+        Box::new(ArtifactDirsRule::ZIG_CACHES),
+        Box::new(ArtifactDirsRule::DART_CACHES),
     ]);
 
     if args.scan_once {
