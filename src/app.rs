@@ -27,6 +27,7 @@ pub(crate) fn run(args: CliArgs) -> Result<()> {
         Box::new(ArtifactDirsRule::PNPM_STORE),
         Box::new(MarkedBuildDirRule::CARGO_TARGET),
         Box::new(MarkedBuildDirRule::MAVEN_TARGET),
+        Box::new(MarkedBuildDirRule::GRADLE_BUILD),
         Box::new(ArtifactDirsRule::PYTHON_CACHES),
         Box::new(EggInfoRule),
         Box::new(ArtifactDirsRule::JS_BUILD),
@@ -597,6 +598,39 @@ mod tests {
         );
         assert!(registry.contains_path(&proj), "project dir stays watched");
         assert!(registry.contains_path(&src), "sibling src stays watched");
+        Ok(())
+    }
+
+    #[test]
+    fn rescan_subtree_reconciles_gradle_build_after_marker() -> Result<()> {
+        let temp = TempDir::new()?;
+        let proj = temp.path().join("proj");
+        let build = proj.join("build");
+        let build_classes = build.join("classes");
+        fs::create_dir_all(&build_classes)?;
+
+        let rules = RuleEngine::new(vec![Box::new(MarkedBuildDirRule::GRADLE_BUILD)]);
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+
+        // No Gradle script yet: build does not match, so it is watched.
+        let discovered = discover_watch_targets(&proj, &rules)?;
+        apply_discovered_paths(discovered, true, &mut watcher, &mut registry)?;
+        assert!(registry.contains_path(&build), "build watched pre-marker");
+
+        // Marker appears; a scoped rescan must now skip build's subtree.
+        fs::write(proj.join("build.gradle.kts"), b"")?;
+        rescan_subtree(&proj, true, &mut watcher, &mut registry, &rules)?;
+
+        assert!(
+            !registry.contains_path(&build),
+            "matched build must not be watched"
+        );
+        assert!(
+            !registry.contains_path(&build_classes),
+            "build subtree must be pruned"
+        );
+        assert!(registry.contains_path(&proj), "project dir stays watched");
         Ok(())
     }
 

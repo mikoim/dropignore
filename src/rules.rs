@@ -136,6 +136,17 @@ impl MarkedBuildDirRule {
         dir: "target",
         markers: &["pom.xml"],
     };
+
+    pub(crate) const GRADLE_BUILD: Self = Self {
+        name: "Gradle build directory",
+        dir: "build",
+        markers: &[
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+        ],
+    };
 }
 
 impl Rule for MarkedBuildDirRule {
@@ -636,5 +647,71 @@ mod tests {
             "an .egg-info suffix must match even when the name has non-UTF-8 bytes"
         );
         Ok(())
+    }
+
+    #[test]
+    fn gradle_build_rule_matches_with_each_marker() -> Result<()> {
+        for marker in [
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+        ] {
+            let temp = TempDir::new().context("Failed to create temp dir")?;
+            fs::write(temp.path().join(marker), b"")?;
+            let build_dir = temp.path().join("build");
+            fs::create_dir(&build_dir)?;
+
+            let metadata = fs::metadata(&build_dir)?;
+            let candidate = Candidate {
+                path: &build_dir,
+                file_type: metadata.file_type(),
+            };
+            assert!(
+                MarkedBuildDirRule::GRADLE_BUILD.matches(&candidate),
+                "build with sibling {marker} must match"
+            );
+        }
+        assert_eq!(
+            MarkedBuildDirRule::GRADLE_BUILD.name(),
+            "Gradle build directory"
+        );
+        assert_eq!(
+            MarkedBuildDirRule::GRADLE_BUILD.action(),
+            MatchAction::IGNORE_AND_SKIP
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gradle_build_rule_ignores_build_without_marker() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let build_dir = temp.path().join("build");
+        fs::create_dir(&build_dir)?;
+
+        let metadata = fs::metadata(&build_dir)?;
+        let candidate = Candidate {
+            path: &build_dir,
+            file_type: metadata.file_type(),
+        };
+        assert!(
+            !MarkedBuildDirRule::GRADLE_BUILD.matches(&candidate),
+            "build without a Gradle script sibling must not match"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rule_engine_recognizes_gradle_triggers() {
+        let engine = RuleEngine::new(vec![Box::new(MarkedBuildDirRule::GRADLE_BUILD)]);
+        for trigger in [
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+        ] {
+            assert!(engine.is_trigger(OsStr::new(trigger)), "{trigger}");
+        }
+        assert!(!engine.is_trigger(OsStr::new("pom.xml")));
     }
 }
