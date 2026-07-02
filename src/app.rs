@@ -205,8 +205,14 @@ fn drain_events(
         // reseed is a no-op when the path is gone (moved out of tree) or
         // re-registers it when the descriptor was reused for a live path.
         // An unknown descriptor means an earlier scope already drained it.
+        // If the root itself moved, every watch is about to go stale and the
+        // canonicalized root path is no longer valid; fail so a supervisor
+        // restarts the process instead of it idling with no watches.
         if event.mask.contains(EventMask::MOVE_SELF) {
             if let Some(path) = registry.path_for(&event.wd) {
+                if path.as_path() == root {
+                    anyhow::bail!("Watched root {} was moved or renamed", root.display());
+                }
                 rescan_scopes.insert(path.clone());
             }
             continue;
@@ -214,8 +220,14 @@ fn drain_events(
 
         // Deletion needs no rescan: the kernel auto-removes the watch, and a
         // recursive delete fires DELETE_SELF for every directory, so dropping
-        // this one entry leaves nothing stale behind.
+        // this one entry leaves nothing stale behind. A deleted root gets the
+        // same fail-fast treatment as a moved one.
         if event.mask.contains(EventMask::DELETE_SELF) {
+            if let Some(path) = registry.path_for(&event.wd)
+                && path.as_path() == root
+            {
+                anyhow::bail!("Watched root {} was deleted", root.display());
+            }
             registry.remove_by_descriptor(&event.wd);
             continue;
         }
@@ -826,6 +838,67 @@ mod tests {
             fresh.watchers.len(),
             "registry must match a fresh discovery of the root"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn drain_events_errors_when_root_is_moved() -> Result<()> {
+        use std::thread::sleep;
+        use std::time::{Duration, Instant};
+
+        let temp = TempDir::new()?;
+        let root = temp.path().join("root");
+        fs::create_dir(&root)?;
+
+        let rules = engine();
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+        let initial = discover_watch_targets(&root, &rules)?;
+        apply_discovered_paths(initial, true, &mut watcher, &mut registry)?;
+
+        fs::rename(&root, temp.path().join("elsewhere"))?;
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut outcome = Ok(());
+        while Instant::now() < deadline && outcome.is_ok() {
+            outcome = drain_events(&mut watcher, &mut registry, &rules, &root, true);
+            sleep(Duration::from_millis(20));
+        }
+
+        let err = outcome.expect_err("root move must surface an error");
+        assert!(
+            err.to_string().contains("was moved or renamed"),
+            "got: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn drain_events_errors_when_root_is_deleted() -> Result<()> {
+        use std::thread::sleep;
+        use std::time::{Duration, Instant};
+
+        let temp = TempDir::new()?;
+        let root = temp.path().join("root");
+        fs::create_dir(&root)?;
+
+        let rules = engine();
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+        let initial = discover_watch_targets(&root, &rules)?;
+        apply_discovered_paths(initial, true, &mut watcher, &mut registry)?;
+
+        fs::remove_dir_all(&root)?;
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut outcome = Ok(());
+        while Instant::now() < deadline && outcome.is_ok() {
+            outcome = drain_events(&mut watcher, &mut registry, &rules, &root, true);
+            sleep(Duration::from_millis(20));
+        }
+
+        let err = outcome.expect_err("root deletion must surface an error");
+        assert!(err.to_string().contains("was deleted"), "got: {err}");
         Ok(())
     }
 
