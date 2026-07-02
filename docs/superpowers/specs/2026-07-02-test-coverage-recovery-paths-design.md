@@ -94,7 +94,7 @@ in a unit test; skip with an `eprintln!`, mirroring the existing
 
 ## Error Handling
 
-Tests follow the existing conventions: deadline-bounded drain loops (5 s) so
+Tests follow the existing conventions: deadline-bounded drain loops (5 s; 10 s for the overflow tests) so
 missed events fail the assertion rather than hanging, and environment-driven
 skips print to stderr instead of failing.
 

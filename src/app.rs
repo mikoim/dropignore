@@ -978,6 +978,7 @@ mod tests {
         let temp = TempDir::new()?;
         let file = temp.path().join("plain");
         fs::write(&file, b"")?;
+        ensure_directory(temp.path())?;
 
         let err = ensure_directory(&file).expect_err("a regular file must be rejected");
         assert!(
