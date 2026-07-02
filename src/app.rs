@@ -972,4 +972,229 @@ mod tests {
         assert!(!action.watch_dir, "a non-directory must not be watched");
         Ok(())
     }
+
+    #[test]
+    fn ensure_directory_rejects_non_directory() -> Result<()> {
+        let temp = TempDir::new()?;
+        let file = temp.path().join("plain");
+        fs::write(&file, b"")?;
+        ensure_directory(temp.path())?;
+
+        let err = ensure_directory(&file).expect_err("a regular file must be rejected");
+        assert!(
+            err.to_string().contains("is not a directory"),
+            "got: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn drain_events_removes_registry_entry_for_deleted_subdir() -> Result<()> {
+        use std::thread::sleep;
+        use std::time::{Duration, Instant};
+
+        let temp = TempDir::new()?;
+        let root = temp.path().to_path_buf();
+        let a = root.join("a");
+        fs::create_dir(&a)?;
+
+        let rules = engine();
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+        let initial = discover_watch_targets(&root, &rules)?;
+        apply_discovered_paths(initial, true, &mut watcher, &mut registry)?;
+        assert!(registry.contains_path(&a), "a watched before deletion");
+
+        fs::remove_dir(&a)?;
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && registry.contains_path(&a) {
+            drain_events(&mut watcher, &mut registry, &rules, &root, true)?;
+            sleep(Duration::from_millis(20));
+        }
+
+        assert!(
+            !registry.contains_path(&a),
+            "deleted subdir must leave the registry via DELETE_SELF"
+        );
+        assert!(registry.contains_path(&root), "root stays watched");
+        Ok(())
+    }
+
+    #[test]
+    fn drain_events_rescans_when_trigger_file_appears() -> Result<()> {
+        use std::thread::sleep;
+        use std::time::{Duration, Instant};
+
+        let temp = TempDir::new()?;
+        let root = temp.path().to_path_buf();
+        let proj = root.join("proj");
+        let target = proj.join("target");
+        fs::create_dir_all(&target)?;
+
+        let rules = RuleEngine::new(vec![Box::new(MarkedBuildDirRule::CARGO_TARGET)]);
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+        let initial = discover_watch_targets(&root, &rules)?;
+        apply_discovered_paths(initial, true, &mut watcher, &mut registry)?;
+        assert!(
+            registry.contains_path(&target),
+            "target watched while no Cargo.toml exists"
+        );
+
+        fs::write(proj.join("Cargo.toml"), b"[package]\nname=\"demo\"")?;
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && registry.contains_path(&target) {
+            drain_events(&mut watcher, &mut registry, &rules, &root, true)?;
+            sleep(Duration::from_millis(20));
+        }
+
+        assert!(
+            !registry.contains_path(&target),
+            "trigger CREATE event must un-watch target via scoped rescan"
+        );
+        assert!(registry.contains_path(&proj), "project dir stays watched");
+        assert!(registry.contains_path(&root), "root stays watched");
+        Ok(())
+    }
+
+    #[test]
+    fn event_loop_processes_events_before_shutdown() -> Result<()> {
+        use std::thread;
+        use std::time::Duration;
+
+        let temp = TempDir::new()?;
+        let root = temp.path().to_path_buf();
+        let rules = engine();
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+        let initial = discover_watch_targets(&root, &rules)?;
+        apply_discovered_paths(initial, true, &mut watcher, &mut registry)?;
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&shutdown);
+        let root_for_thread = root.clone();
+        let handle =
+            thread::spawn(move || event_loop(root_for_thread, true, watcher, registry, rules, flag));
+
+        // Let the loop reach its poll wait, then create a directory it must pick up.
+        thread::sleep(Duration::from_millis(50));
+        let newdir = root.join("newdir");
+        fs::create_dir(&newdir)?;
+
+        // Give the loop one full poll window to drain the event, then stop it.
+        thread::sleep(Duration::from_millis(600));
+        shutdown.store(true, Ordering::Relaxed);
+
+        let registry = handle.join().expect("event loop thread panicked")?;
+        assert!(
+            registry.contains_path(&newdir),
+            "event_loop must watch a directory created while it runs"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn drain_events_recovers_from_queue_overflow() -> Result<()> {
+        use std::thread::sleep;
+        use std::time::{Duration, Instant};
+
+        let max: usize = fs::read_to_string("/proc/sys/fs/inotify/max_queued_events")?
+            .trim()
+            .parse()?;
+        if max > 65536 {
+            eprintln!("skipping: max_queued_events={max} is too large to overflow in a test");
+            return Ok(());
+        }
+
+        let temp = TempDir::new()?;
+        let root = temp.path().to_path_buf();
+        let rules = engine();
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+        let initial = discover_watch_targets(&root, &rules)?;
+        apply_discovered_paths(initial, true, &mut watcher, &mut registry)?;
+
+        // Fill the kernel queue without draining so it genuinely overflows.
+        for i in 0..(max + 100) {
+            fs::write(root.join(format!("f{i}")), b"")?;
+        }
+
+        // Created while events are being dropped: their CREATE events are lost,
+        // so only the overflow rescan can discover them.
+        let late_dir = root.join("late_dir");
+        let nm = root.join("node_modules");
+        fs::create_dir(&late_dir)?;
+        fs::create_dir(&nm)?;
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && !registry.contains_path(&late_dir) {
+            drain_events(&mut watcher, &mut registry, &rules, &root, true)?;
+            sleep(Duration::from_millis(20));
+        }
+
+        assert!(
+            registry.contains_path(&late_dir),
+            "overflow rescan must find a directory whose CREATE was dropped"
+        );
+        assert!(
+            !registry.contains_path(&nm),
+            "overflow rescan must skip matched node_modules"
+        );
+        let fresh = discover_watch_targets(&root, &rules)?;
+        assert_eq!(
+            registry.watched_count(),
+            fresh.watchers.len(),
+            "registry must match a fresh discovery after overflow recovery"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn drain_events_errors_when_root_vanishes_during_overflow() -> Result<()> {
+        use std::thread::sleep;
+        use std::time::{Duration, Instant};
+
+        let max: usize = fs::read_to_string("/proc/sys/fs/inotify/max_queued_events")?
+            .trim()
+            .parse()?;
+        if max > 65536 {
+            eprintln!("skipping: max_queued_events={max} is too large to overflow in a test");
+            return Ok(());
+        }
+
+        let temp = TempDir::new()?;
+        let root = temp.path().join("root");
+        fs::create_dir(&root)?;
+
+        let rules = engine();
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+        let initial = discover_watch_targets(&root, &rules)?;
+        apply_discovered_paths(initial, true, &mut watcher, &mut registry)?;
+
+        // Fill the kernel queue without draining so it genuinely overflows.
+        for i in 0..(max + 100) {
+            fs::write(root.join(format!("f{i}")), b"")?;
+        }
+
+        // The queue is still full, so the root's DELETE_SELF is dropped too;
+        // only the overflow rescan can notice the root is gone.
+        fs::remove_dir_all(&root)?;
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut outcome = Ok(());
+        while Instant::now() < deadline && outcome.is_ok() {
+            outcome = drain_events(&mut watcher, &mut registry, &rules, &root, true);
+            sleep(Duration::from_millis(20));
+        }
+
+        let err = outcome.expect_err("vanished root must surface an error after overflow");
+        assert!(
+            err.to_string().contains("disappeared during overflow rescan"),
+            "got: {err}"
+        );
+        Ok(())
+    }
 }
