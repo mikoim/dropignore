@@ -204,7 +204,7 @@ fn drain_events(
         // of the old path: the drain sweeps the whole stale subtree, and the
         // reseed is a no-op when the path is gone (moved out of tree) or
         // re-registers it when the descriptor was reused for a live path.
-        // An unknown descriptor means an earlier scope already drained it.
+        // An unknown descriptor means a prior batch's rescan already drained it.
         // If the root itself moved, every watch is about to go stale and the
         // canonicalized root path is no longer valid; fail so a supervisor
         // restarts the process instead of it idling with no watches.
@@ -317,6 +317,16 @@ fn drain_events(
         // Overflow dropped events: no descriptor is trustworthy, so rebuild
         // the whole tree. This supersedes any recorded scopes (all under root).
         rescan_subtree(root, dry_run, watcher, registry, rule_engine)?;
+
+        // The overflow may have swallowed the root's own MOVE_SELF or
+        // DELETE_SELF; if the rescan could not re-watch the root, the tree is
+        // gone and idling with zero watches would hide the failure.
+        if !registry.contains_path(root) {
+            anyhow::bail!(
+                "Watched root {} disappeared during overflow rescan",
+                root.display()
+            );
+        }
     } else {
         for scope in &rescan_scopes {
             rescan_subtree(scope, dry_run, watcher, registry, rule_engine)?;
