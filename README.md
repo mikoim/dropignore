@@ -8,11 +8,24 @@ CLI tool that watches a directory with inotify and marks matching paths with Dro
 - Skips descending into ignored subtrees to avoid unnecessary watches.
 - Dry-run mode logs intended actions without calling `setxattr`.
 - Detailed logging via `env_logger`.
+- One-shot scan mode (`--scan-once`) for cron or systemd-timer use: marks existing matches and exits without watching.
 
 ## Usage
 ```bash
 cargo run -- --dry-run /home/foo/Dropbox  # inspect what would be ignored
 cargo run -- /home/foo/Dropbox            # apply Dropbox ignore attribute
+cargo run -- --scan-once /home/foo/Dropbox  # mark existing matches once and exit
+```
+
+### One-shot scans
+`--scan-once` walks the tree once, marks every match, and exits without
+registering any inotify watches. It composes with `--dry-run` to preview.
+The process exits non-zero when at least one matched path could not be
+marked, so failures surface through cron mail or a systemd `OnFailure=`
+unit. Example crontab entry:
+
+```cron
+0 * * * * /usr/local/bin/dropignore --scan-once /home/foo/Dropbox
 ```
 
 ### Logging
