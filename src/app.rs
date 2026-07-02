@@ -986,4 +986,37 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn drain_events_removes_registry_entry_for_deleted_subdir() -> Result<()> {
+        use std::thread::sleep;
+        use std::time::{Duration, Instant};
+
+        let temp = TempDir::new()?;
+        let root = temp.path().to_path_buf();
+        let a = root.join("a");
+        fs::create_dir(&a)?;
+
+        let rules = engine();
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+        let initial = discover_watch_targets(&root, &rules)?;
+        apply_discovered_paths(initial, true, &mut watcher, &mut registry)?;
+        assert!(registry.contains_path(&a), "a watched before deletion");
+
+        fs::remove_dir(&a)?;
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && registry.contains_path(&a) {
+            drain_events(&mut watcher, &mut registry, &rules, &root, true)?;
+            sleep(Duration::from_millis(20));
+        }
+
+        assert!(
+            !registry.contains_path(&a),
+            "deleted subdir must leave the registry via DELETE_SELF"
+        );
+        assert!(registry.contains_path(&root), "root stays watched");
+        Ok(())
+    }
 }
