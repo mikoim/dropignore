@@ -1,4 +1,4 @@
-use log::info;
+use log::{debug, info};
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
@@ -37,6 +37,12 @@ impl MatchAction {
         set_dropbox_ignore: true,
         skip_descendants: true,
     };
+
+    /// Skip descending (and watching) without touching the Dropbox attribute.
+    pub(crate) const SKIP_ONLY: Self = Self {
+        set_dropbox_ignore: false,
+        skip_descendants: true,
+    };
 }
 
 /// Rule match containing metadata useful for logging and control flow.
@@ -49,8 +55,14 @@ pub(crate) struct RuleMatch {
 impl RuleMatch {
     /// Log that this match fired for `path`. Kept out of `RuleEngine::evaluate`
     /// so that evaluation stays a pure query and the caller controls logging.
+    /// Skip-only matches log at debug: they do not act on Dropbox state, and
+    /// at info they would add one line per repository directory.
     pub(crate) fn log_matched(&self, path: &Path) {
-        info!("Matched rule '{}' for {}", self.name, path.display());
+        if self.action.set_dropbox_ignore {
+            info!("Matched rule '{}' for {}", self.name, path.display());
+        } else {
+            debug!("Matched rule '{}' for {}", self.name, path.display());
+        }
     }
 }
 
@@ -212,24 +224,29 @@ const JS_ARTIFACT_DIRS: &[&str] = &[
 pub(crate) struct ArtifactDirsRule {
     name: &'static str,
     dirs: &'static [&'static str],
+    action: MatchAction,
 }
 
 impl ArtifactDirsRule {
     pub(crate) const NODE_MODULES: Self = Self {
         name: "node_modules directory",
         dirs: &["node_modules"],
+        action: MatchAction::IGNORE_AND_SKIP,
     };
     pub(crate) const PNPM_STORE: Self = Self {
         name: "pnpm store directory",
         dirs: &[".pnpm-store"],
+        action: MatchAction::IGNORE_AND_SKIP,
     };
     pub(crate) const PYTHON_CACHES: Self = Self {
         name: "Python build/cache artifact",
         dirs: PYTHON_ARTIFACT_DIRS,
+        action: MatchAction::IGNORE_AND_SKIP,
     };
     pub(crate) const JS_BUILD: Self = Self {
         name: "JavaScript build/cache directory",
         dirs: JS_ARTIFACT_DIRS,
+        action: MatchAction::IGNORE_AND_SKIP,
     };
     /// Project-local Gradle cache. The guarded `build` output lives in
     /// `MarkedBuildDirRule::GRADLE_BUILD`; `.gradle` is unconditional because
@@ -238,6 +255,7 @@ impl ArtifactDirsRule {
     pub(crate) const JVM_CACHES: Self = Self {
         name: "Gradle cache directory",
         dirs: &[".gradle"],
+        action: MatchAction::IGNORE_AND_SKIP,
     };
     /// IaC tool caches: `.terraform` holds provider/module downloads
     /// recreated by `terraform init`; `.terragrunt-cache` is Terragrunt's
@@ -245,12 +263,25 @@ impl ArtifactDirsRule {
     pub(crate) const IAC_CACHES: Self = Self {
         name: "IaC cache directory",
         dirs: &[".terraform", ".terragrunt-cache"],
+        action: MatchAction::IGNORE_AND_SKIP,
     };
     /// Dev-environment state dirs: `.direnv` is direnv's layout/cache dir,
     /// `.devenv` is devenv's local state; both are regenerated on demand.
     pub(crate) const DEV_ENV_DIRS: Self = Self {
         name: "development environment directory",
         dirs: &[".direnv", ".devenv"],
+        action: MatchAction::IGNORE_AND_SKIP,
+    };
+
+    /// Version control internals. Never marked (syncing a repository stays
+    /// the user's choice) but never descended into either: nothing inside
+    /// ever matches a rule, and watching e.g. `.git/objects/*` wastes
+    /// thousands of inotify watches and floods the event queue during git
+    /// operations.
+    pub(crate) const VCS_DIRS: Self = Self {
+        name: "version control directory",
+        dirs: &[".git", ".hg", ".svn", ".jj", ".bzr"],
+        action: MatchAction::SKIP_ONLY,
     };
 }
 
@@ -271,7 +302,7 @@ impl Rule for ArtifactDirsRule {
     }
 
     fn action(&self) -> MatchAction {
-        MatchAction::IGNORE_AND_SKIP
+        self.action
     }
 }
 
@@ -786,6 +817,58 @@ mod tests {
             };
             assert!(rule.matches(&candidate), "{name} should match");
         }
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn vcs_dirs_rule_skips_all_vcs_dirs_without_marking() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        assert_eq!(
+            ArtifactDirsRule::VCS_DIRS.name(),
+            "version control directory"
+        );
+        for name in [".git", ".hg", ".svn", ".jj", ".bzr"] {
+            let dir = temp.path().join(name);
+            fs::create_dir(&dir)?;
+            let meta = fs::metadata(&dir)?;
+            let candidate = Candidate {
+                path: &dir,
+                file_type: meta.file_type(),
+            };
+            assert!(
+                ArtifactDirsRule::VCS_DIRS.matches(&candidate),
+                "{name} should match"
+            );
+        }
+        assert_eq!(ArtifactDirsRule::VCS_DIRS.action(), MatchAction::SKIP_ONLY);
+        assert!(
+            !MatchAction::SKIP_ONLY.set_dropbox_ignore,
+            "skip-only must never mark"
+        );
+        assert!(
+            MatchAction::SKIP_ONLY.skip_descendants,
+            "skip-only must skip descendants"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn vcs_dirs_rule_ignores_git_file() -> Result<()> {
+        // Submodules and linked worktrees use a .git *file*; it needs no
+        // skipping (files have no descendants) and must not match.
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let git_file = temp.path().join(".git");
+        fs::write(&git_file, b"gitdir: ../.git/modules/x")?;
+        let meta = fs::metadata(&git_file)?;
+        let candidate = Candidate {
+            path: &git_file,
+            file_type: meta.file_type(),
+        };
+        assert!(
+            !ArtifactDirsRule::VCS_DIRS.matches(&candidate),
+            "a .git file must not match"
+        );
         Ok(())
     }
 }

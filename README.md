@@ -6,6 +6,7 @@ CLI tool that watches a directory with inotify and marks matching paths with Dro
 - Recursive watch starting at a user-specified root, using dynamic inotify registrations.
 - Rule-based matching (currently: `node_modules`, pnpm `.pnpm-store`, Cargo/Maven `target` with an adjacent `Cargo.toml`/`pom.xml`, Gradle `build` with an adjacent Gradle build/settings script, Gradle cache `.gradle`, Python virtualenvs `venv`/`.venv`, `*.egg-info`, Python tool caches `__pycache__`/`.pytest_cache`/`.mypy_cache`/`.ruff_cache`/`.tox`, JS build/cache dirs `.next`/`.nuxt`/`.turbo`/`.parcel-cache`/`.svelte-kit`/`.astro`/`.angular`/`.vite`, IaC caches `.terraform`/`.terragrunt-cache`, and dev-environment dirs `.direnv`/`.devenv`).
 - Skips descending into ignored subtrees to avoid unnecessary watches.
+- Never watches version control internals (`.git`, `.hg`, `.svn`, `.jj`, `.bzr`): skipped without being marked, so repositories still sync while inotify watches are spared.
 - Dry-run mode logs intended actions without calling `setxattr`.
 - Detailed logging via `env_logger`.
 - One-shot scan mode (`--scan-once`) for cron or systemd-timer use: marks existing matches and exits without watching.

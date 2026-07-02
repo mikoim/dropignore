@@ -285,4 +285,44 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn discover_watch_targets_skips_vcs_dirs_without_marking() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let git_dir = temp.path().join(".git");
+        let git_objects = git_dir.join("objects");
+        let nm_in_git = git_dir.join("node_modules");
+        let keep_dir = temp.path().join("keep");
+        fs::create_dir_all(&git_objects)?;
+        fs::create_dir(&nm_in_git)?;
+        fs::create_dir(&keep_dir)?;
+
+        let engine = RuleEngine::new(vec![
+            Box::new(ArtifactDirsRule::VCS_DIRS),
+            Box::new(ArtifactDirsRule::NODE_MODULES),
+        ]);
+        let discovered = discover_watch_targets(temp.path(), &engine)?;
+
+        assert!(
+            discovered.watchers.contains(&keep_dir),
+            "plain sibling should be watched"
+        );
+        assert!(
+            !discovered.watchers.contains(&git_dir),
+            ".git must not be watched"
+        );
+        assert!(
+            !discovered.watchers.contains(&git_objects),
+            ".git contents must not be watched"
+        );
+        assert!(
+            !discovered.matches.contains(&git_dir),
+            ".git must not be marked"
+        );
+        assert!(
+            !discovered.matches.contains(&nm_in_git),
+            "matches inside a skipped VCS dir must not be marked"
+        );
+        Ok(())
+    }
 }
