@@ -36,6 +36,12 @@ pub(crate) fn run(args: CliArgs) -> Result<()> {
         Box::new(ArtifactDirsRule::DEV_ENV_DIRS),
     ]);
 
+    if args.scan_once {
+        return scan_once(&root, &rule_engine, |path| {
+            apply_dropbox_ignore(path, args.dry_run)
+        });
+    }
+
     // A signal handler flips this flag; the event loop polls it and exits
     // cleanly so a supervisor's SIGTERM yields exit code 0 rather than 143.
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -54,6 +60,27 @@ pub(crate) fn run(args: CliArgs) -> Result<()> {
 
     info!("Watching {}", root.display());
     let _final_registry = event_loop(root, args.dry_run, watcher, registry, rule_engine, shutdown)?;
+    Ok(())
+}
+
+/// Walk the tree once, apply `apply` to every rule match, and return. Watch
+/// targets from discovery are ignored: nothing is registered with inotify.
+/// Fails when at least one matched path could not be marked, so cron/systemd
+/// sees a non-zero exit code.
+fn scan_once<F>(root: &Path, rules: &RuleEngine, apply: F) -> Result<()>
+where
+    F: FnMut(&Path) -> Result<()>,
+{
+    let discovered = discover_watch_targets(root, rules)?;
+    let total = discovered.matches.len();
+    let failures = apply_all(&discovered.matches, apply);
+    if failures > 0 {
+        anyhow::bail!("Failed to mark {failures} of {total} matched path(s)");
+    }
+    info!(
+        "Scan complete: {total} matched path(s) under {}",
+        root.display()
+    );
     Ok(())
 }
 
@@ -981,10 +1008,7 @@ mod tests {
         ensure_directory(temp.path())?;
 
         let err = ensure_directory(&file).expect_err("a regular file must be rejected");
-        assert!(
-            err.to_string().contains("is not a directory"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("is not a directory"), "got: {err}");
         Ok(())
     }
 
@@ -1075,8 +1099,9 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&shutdown);
         let root_for_thread = root.clone();
-        let handle =
-            thread::spawn(move || event_loop(root_for_thread, true, watcher, registry, rules, flag));
+        let handle = thread::spawn(move || {
+            event_loop(root_for_thread, true, watcher, registry, rules, flag)
+        });
 
         // Let the loop reach its poll wait, then create a directory it must pick up.
         thread::sleep(Duration::from_millis(50));
@@ -1192,8 +1217,42 @@ mod tests {
 
         let err = outcome.expect_err("vanished root must surface an error after overflow");
         assert!(
-            err.to_string().contains("disappeared during overflow rescan"),
+            err.to_string()
+                .contains("disappeared during overflow rescan"),
             "got: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn scan_once_visits_matches_only() -> Result<()> {
+        let temp = TempDir::new()?;
+        let ignored = temp.path().join("node_modules");
+        let plain = temp.path().join("src");
+        fs::create_dir(&ignored)?;
+        fs::create_dir(&plain)?;
+
+        let mut visited = Vec::new();
+        scan_once(temp.path(), &engine(), |path| {
+            visited.push(path.to_path_buf());
+            Ok(())
+        })?;
+
+        assert_eq!(visited, vec![ignored], "only the matched path is applied");
+        Ok(())
+    }
+
+    #[test]
+    fn scan_once_fails_when_any_apply_fails() -> Result<()> {
+        let temp = TempDir::new()?;
+        fs::create_dir(temp.path().join("node_modules"))?;
+
+        let err = scan_once(temp.path(), &engine(), |_| anyhow::bail!("boom"))
+            .expect_err("a failed apply must fail the scan");
+
+        assert!(
+            err.to_string().contains("1 of 1"),
+            "message must carry failure/total counts, got: {err}"
         );
         Ok(())
     }
