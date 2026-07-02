@@ -1057,4 +1057,40 @@ mod tests {
         assert!(registry.contains_path(&root), "root stays watched");
         Ok(())
     }
+
+    #[test]
+    fn event_loop_processes_events_before_shutdown() -> Result<()> {
+        use std::thread;
+        use std::time::Duration;
+
+        let temp = TempDir::new()?;
+        let root = temp.path().to_path_buf();
+        let rules = engine();
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+        let initial = discover_watch_targets(&root, &rules)?;
+        apply_discovered_paths(initial, true, &mut watcher, &mut registry)?;
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&shutdown);
+        let root_for_thread = root.clone();
+        let handle =
+            thread::spawn(move || event_loop(root_for_thread, true, watcher, registry, rules, flag));
+
+        // Let the loop reach its poll wait, then create a directory it must pick up.
+        thread::sleep(Duration::from_millis(50));
+        let newdir = root.join("newdir");
+        fs::create_dir(&newdir)?;
+
+        // Give the loop one full poll window to drain the event, then stop it.
+        thread::sleep(Duration::from_millis(600));
+        shutdown.store(true, Ordering::Relaxed);
+
+        let registry = handle.join().expect("event loop thread panicked")?;
+        assert!(
+            registry.contains_path(&newdir),
+            "event_loop must watch a directory created while it runs"
+        );
+        Ok(())
+    }
 }
