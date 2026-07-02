@@ -1,5 +1,5 @@
 use crate::cli::CliArgs;
-use crate::discovery::{DiscoveredPaths, discover_watch_targets};
+use crate::discovery::{DiscoveredPaths, discover_matches, discover_watch_targets};
 use crate::dropbox::apply_dropbox_ignore;
 use crate::rules::{ArtifactDirsRule, Candidate, EggInfoRule, MarkedBuildDirRule, RuleEngine};
 use crate::watch::{WatchRegistry, add_watch};
@@ -63,17 +63,17 @@ pub(crate) fn run(args: CliArgs) -> Result<()> {
     Ok(())
 }
 
-/// Walk the tree once, apply `apply` to every rule match, and return. Watch
-/// targets from discovery are ignored: nothing is registered with inotify.
-/// Fails when at least one matched path could not be marked, so cron/systemd
-/// sees a non-zero exit code.
+/// Walk the tree once, apply `apply` to every rule match, and return. Watcher
+/// collection is skipped entirely (`discover_matches`): nothing is registered
+/// with inotify. Fails when at least one matched path could not be marked, so
+/// cron/systemd sees a non-zero exit code.
 fn scan_once<F>(root: &Path, rules: &RuleEngine, apply: F) -> Result<()>
 where
     F: FnMut(&Path) -> Result<()>,
 {
-    let discovered = discover_watch_targets(root, rules)?;
-    let total = discovered.matches.len();
-    let failures = apply_all(&discovered.matches, apply);
+    let matches = discover_matches(root, rules)?;
+    let total = matches.len();
+    let failures = apply_all(&matches, apply);
     if failures > 0 {
         anyhow::bail!("Failed to mark {failures} of {total} matched path(s)");
     }
@@ -452,6 +452,7 @@ fn rescan_subtree(
 mod tests {
     use super::*;
     use crate::discovery::discover_watch_targets;
+    use crate::test_util::xattr_supported;
     use crate::watch::{WatchRegistry, watch_mask};
     use anyhow::Result;
     use inotify::Inotify;
@@ -1257,18 +1258,6 @@ mod tests {
             "message must carry failure/total counts, got: {err}"
         );
         Ok(())
-    }
-
-    /// True when the filesystem hosting `path` accepts user.* xattrs. Used to
-    /// skip (not fail) on filesystems without support.
-    fn xattr_supported(path: &Path) -> bool {
-        let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
-        let c_name = CString::new("user.dropignore.probe").unwrap();
-        // SAFETY: pointers are valid for the duration of the call; the value
-        // is one byte and the length matches.
-        let result =
-            unsafe { libc::setxattr(c_path.as_ptr(), c_name.as_ptr(), b"1".as_ptr().cast(), 1, 0) };
-        result == 0
     }
 
     #[test]

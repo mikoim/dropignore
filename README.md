@@ -42,8 +42,15 @@ RUST_LOG=debug cargo run -- --dry-run /home/foo/Dropbox
 
 ## Testing
 ```bash
-cargo test
+cargo test          # tests only
+./scripts/check.sh  # full gate: fmt --check, clippy -D warnings, tests
 ```
+
+Enable the gate as a pre-commit hook (opt-in, once per clone):
+```bash
+git config core.hooksPath .githooks
+```
+Bypass in emergencies with `git commit --no-verify`.
 
 ## Extending rules
 For a new "ignore directories with these exact names" rule, add the name to an

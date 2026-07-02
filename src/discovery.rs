@@ -12,9 +12,11 @@ pub(crate) struct DiscoveredPaths {
 }
 
 /// Walk the directory tree rooted at `start` and gather:
-/// - All directories that should be watched (excluding ignored subtrees).
 /// - All paths that satisfy a matching rule.
-pub(crate) fn discover_watch_targets(start: &Path, rules: &RuleEngine) -> Result<DiscoveredPaths> {
+/// - When `collect_watchers` is set, all directories that should be watched
+///   (excluding ignored subtrees). `--scan-once` never registers watches, so
+///   it skips this collection.
+fn walk(start: &Path, rules: &RuleEngine, collect_watchers: bool) -> Result<DiscoveredPaths> {
     let mut discovered = DiscoveredPaths::default();
     let mut stack = vec![start.to_path_buf()];
 
@@ -46,7 +48,9 @@ pub(crate) fn discover_watch_targets(start: &Path, rules: &RuleEngine) -> Result
             }
         }
 
-        discovered.watchers.push(dir.clone());
+        if collect_watchers {
+            discovered.watchers.push(dir.clone());
+        }
 
         let read_dir = match fs::read_dir(&dir) {
             Ok(rd) => rd,
@@ -105,6 +109,17 @@ pub(crate) fn discover_watch_targets(start: &Path, rules: &RuleEngine) -> Result
     }
 
     Ok(discovered)
+}
+
+/// Walk the tree and gather both watch targets and rule matches.
+pub(crate) fn discover_watch_targets(start: &Path, rules: &RuleEngine) -> Result<DiscoveredPaths> {
+    walk(start, rules, true)
+}
+
+/// Walk the tree and return only rule matches, skipping watcher collection.
+/// Used by `--scan-once`, which never registers inotify watches.
+pub(crate) fn discover_matches(start: &Path, rules: &RuleEngine) -> Result<Vec<PathBuf>> {
+    Ok(walk(start, rules, false)?.matches)
 }
 
 #[cfg(test)]
@@ -250,6 +265,23 @@ mod tests {
         assert!(
             !discovered.watchers.contains(&nested),
             "__pycache__ child must not be watched"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn discover_matches_agrees_with_full_discovery() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        fs::create_dir(temp.path().join("keep"))?;
+        fs::create_dir(temp.path().join("node_modules"))?;
+
+        let engine = RuleEngine::new(vec![Box::new(ArtifactDirsRule::NODE_MODULES)]);
+        let matches = discover_matches(temp.path(), &engine)?;
+        let full = discover_watch_targets(temp.path(), &engine)?;
+
+        assert_eq!(
+            matches, full.matches,
+            "both discovery entry points must report the same matches"
         );
         Ok(())
     }
