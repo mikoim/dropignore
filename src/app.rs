@@ -26,6 +26,7 @@ pub(crate) fn run(args: CliArgs) -> Result<()> {
         Box::new(ArtifactDirsRule::NODE_MODULES),
         Box::new(ArtifactDirsRule::PNPM_STORE),
         Box::new(MarkedBuildDirRule::CARGO_TARGET),
+        Box::new(MarkedBuildDirRule::MAVEN_TARGET),
         Box::new(ArtifactDirsRule::PYTHON_CACHES),
         Box::new(EggInfoRule),
         Box::new(ArtifactDirsRule::JS_BUILD),

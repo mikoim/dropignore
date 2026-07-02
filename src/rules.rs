@@ -130,6 +130,12 @@ impl MarkedBuildDirRule {
         dir: "target",
         markers: &["Cargo.toml"],
     };
+
+    pub(crate) const MAVEN_TARGET: Self = Self {
+        name: "Maven target directory",
+        dir: "target",
+        markers: &["pom.xml"],
+    };
 }
 
 impl Rule for MarkedBuildDirRule {
@@ -395,6 +401,58 @@ mod tests {
         let engine = RuleEngine::new(vec![Box::new(MarkedBuildDirRule::CARGO_TARGET)]);
         assert!(engine.is_trigger(OsStr::new("Cargo.toml")));
         assert!(!engine.is_trigger(OsStr::new("package.json")));
+    }
+
+    #[test]
+    fn maven_target_rule_requires_pom_xml_in_parent() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        fs::write(temp.path().join("pom.xml"), b"<project/>")?;
+        let target_dir = temp.path().join("target");
+        fs::create_dir(&target_dir)?;
+
+        let metadata = fs::metadata(&target_dir)?;
+        let candidate = Candidate {
+            path: &target_dir,
+            file_type: metadata.file_type(),
+        };
+        assert_eq!(
+            MarkedBuildDirRule::MAVEN_TARGET.name(),
+            "Maven target directory"
+        );
+        assert!(
+            MarkedBuildDirRule::MAVEN_TARGET.matches(&candidate),
+            "target with a sibling pom.xml must match"
+        );
+        assert_eq!(
+            MarkedBuildDirRule::MAVEN_TARGET.action(),
+            MatchAction::IGNORE_AND_SKIP
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn maven_target_rule_ignores_target_without_pom_xml() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let target_dir = temp.path().join("target");
+        fs::create_dir(&target_dir)?;
+
+        let metadata = fs::metadata(&target_dir)?;
+        let candidate = Candidate {
+            path: &target_dir,
+            file_type: metadata.file_type(),
+        };
+        assert!(
+            !MarkedBuildDirRule::MAVEN_TARGET.matches(&candidate),
+            "target without a sibling pom.xml must not match"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rule_engine_recognizes_pom_xml_trigger() {
+        let engine = RuleEngine::new(vec![Box::new(MarkedBuildDirRule::MAVEN_TARGET)]);
+        assert!(engine.is_trigger(OsStr::new("pom.xml")));
+        assert!(!engine.is_trigger(OsStr::new("Cargo.toml")));
     }
 
     #[test]
