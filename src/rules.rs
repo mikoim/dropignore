@@ -194,7 +194,16 @@ const PYTHON_ARTIFACT_DIRS: &[&str] = &[
 /// JavaScript framework build output and tool cache directories matched by
 /// exact name. Each is reproducible and never holds user source. `.turbo` is
 /// Turborepo's local cache (verified against its docs).
-const JS_ARTIFACT_DIRS: &[&str] = &[".next", ".nuxt", ".turbo", ".parcel-cache"];
+const JS_ARTIFACT_DIRS: &[&str] = &[
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".parcel-cache",
+    ".svelte-kit",
+    ".astro",
+    ".angular",
+    ".vite",
+];
 
 /// Rule matching directories whose exact name is in a fixed list. This is the
 /// common "tool-owned artifact directory" shape; every instance marks the
@@ -221,6 +230,26 @@ impl ArtifactDirsRule {
     pub(crate) const JS_BUILD: Self = Self {
         name: "JavaScript build/cache directory",
         dirs: JS_ARTIFACT_DIRS,
+    };
+    /// Project-local Gradle cache. The guarded `build` output lives in
+    /// `MarkedBuildDirRule::GRADLE_BUILD`; `.gradle` is unconditional because
+    /// a directory with this exact name is Gradle-owned in practice and
+    /// marking is non-destructive (sync exclusion only).
+    pub(crate) const JVM_CACHES: Self = Self {
+        name: "Gradle cache directory",
+        dirs: &[".gradle"],
+    };
+    /// IaC tool caches: `.terraform` holds provider/module downloads
+    /// recreated by `terraform init`; `.terragrunt-cache` is Terragrunt's
+    /// working copy.
+    pub(crate) const IAC_CACHES: Self = Self {
+        name: "IaC cache directory",
+        dirs: &[".terraform", ".terragrunt-cache"],
+    };
+    /// Dev-environment state dirs owned by direnv/devenv.
+    pub(crate) const DEV_ENV_DIRS: Self = Self {
+        name: "development environment directory",
+        dirs: &[".direnv", ".devenv"],
     };
 }
 
@@ -523,7 +552,16 @@ mod tests {
         let temp = TempDir::new().context("Failed to create temp dir")?;
         let engine = RuleEngine::new(vec![Box::new(ArtifactDirsRule::JS_BUILD)]);
 
-        for name in [".next", ".nuxt", ".turbo", ".parcel-cache"] {
+        for name in [
+            ".next",
+            ".nuxt",
+            ".turbo",
+            ".parcel-cache",
+            ".svelte-kit",
+            ".astro",
+            ".angular",
+            ".vite",
+        ] {
             let dir = temp.path().join(name);
             fs::create_dir(&dir)?;
             let meta = fs::metadata(&dir)?;
@@ -567,6 +605,21 @@ mod tests {
                 &ArtifactDirsRule::JS_BUILD,
                 ".next",
                 "JavaScript build/cache directory",
+            ),
+            (
+                &ArtifactDirsRule::JVM_CACHES,
+                ".gradle",
+                "Gradle cache directory",
+            ),
+            (
+                &ArtifactDirsRule::IAC_CACHES,
+                ".terraform",
+                "IaC cache directory",
+            ),
+            (
+                &ArtifactDirsRule::DEV_ENV_DIRS,
+                ".direnv",
+                "development environment directory",
             ),
         ];
 
@@ -713,5 +766,25 @@ mod tests {
             assert!(engine.is_trigger(OsStr::new(trigger)), "{trigger}");
         }
         assert!(!engine.is_trigger(OsStr::new("pom.xml")));
+    }
+
+    #[test]
+    fn iac_and_env_rules_match_all_listed_dirs() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let cases: &[(&ArtifactDirsRule, &str)] = &[
+            (&ArtifactDirsRule::IAC_CACHES, ".terragrunt-cache"),
+            (&ArtifactDirsRule::DEV_ENV_DIRS, ".devenv"),
+        ];
+        for (rule, name) in cases {
+            let dir = temp.path().join(name);
+            fs::create_dir(&dir)?;
+            let meta = fs::metadata(&dir)?;
+            let candidate = Candidate {
+                path: &dir,
+                file_type: meta.file_type(),
+            };
+            assert!(rule.matches(&candidate), "{name} should match");
+        }
+        Ok(())
     }
 }

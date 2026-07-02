@@ -31,6 +31,9 @@ pub(crate) fn run(args: CliArgs) -> Result<()> {
         Box::new(ArtifactDirsRule::PYTHON_CACHES),
         Box::new(EggInfoRule),
         Box::new(ArtifactDirsRule::JS_BUILD),
+        Box::new(ArtifactDirsRule::JVM_CACHES),
+        Box::new(ArtifactDirsRule::IAC_CACHES),
+        Box::new(ArtifactDirsRule::DEV_ENV_DIRS),
     ]);
 
     // A signal handler flips this flag; the event loop polls it and exits
