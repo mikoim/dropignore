@@ -455,6 +455,8 @@ mod tests {
     use crate::watch::{WatchRegistry, watch_mask};
     use anyhow::Result;
     use inotify::Inotify;
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::symlink;
     use std::path::Path;
     use tempfile::TempDir;
@@ -1254,6 +1256,52 @@ mod tests {
             err.to_string().contains("1 of 1"),
             "message must carry failure/total counts, got: {err}"
         );
+        Ok(())
+    }
+
+    /// True when the filesystem hosting `path` accepts user.* xattrs. Used to
+    /// skip (not fail) on filesystems without support.
+    fn xattr_supported(path: &Path) -> bool {
+        let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let c_name = CString::new("user.dropignore.probe").unwrap();
+        // SAFETY: pointers are valid for the duration of the call; the value
+        // is one byte and the length matches.
+        let result =
+            unsafe { libc::setxattr(c_path.as_ptr(), c_name.as_ptr(), b"1".as_ptr().cast(), 1, 0) };
+        result == 0
+    }
+
+    #[test]
+    fn scan_once_marks_matches_with_real_xattr() -> Result<()> {
+        let temp = TempDir::new()?;
+        let ignored = temp.path().join("node_modules");
+        fs::create_dir(&ignored)?;
+        if !xattr_supported(temp.path()) {
+            eprintln!("skipping: filesystem lacks user.* xattr support");
+            return Ok(());
+        }
+
+        scan_once(temp.path(), &engine(), |path| {
+            apply_dropbox_ignore(path, false)
+        })?;
+
+        let c_path = CString::new(ignored.as_os_str().as_bytes())?;
+        let c_name = CString::new("user.com.dropbox.ignored")?;
+        // One byte larger than the expected value so a longer stored value
+        // yields a length mismatch instead of a truncated false positive.
+        let mut value = [0u8; 2];
+        // SAFETY: pointers are valid for the duration of the call and the
+        // size matches the buffer.
+        let len = unsafe {
+            libc::getxattr(
+                c_path.as_ptr(),
+                c_name.as_ptr(),
+                value.as_mut_ptr().cast(),
+                value.len(),
+            )
+        };
+        assert_eq!(len, 1, "attribute must be exactly one byte");
+        assert_eq!(&value[..1], b"1", "attribute value must be \"1\"");
         Ok(())
     }
 }
