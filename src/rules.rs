@@ -68,8 +68,8 @@ pub(crate) trait Rule: Send + Sync {
     ///
     /// Scope invariant: a trigger is assumed to affect verdicts only within the
     /// trigger file's own directory subtree, so a scoped rescan fully
-    /// reconciles it. `RustTargetRule` satisfies this — it consults a sibling
-    /// `Cargo.toml`. A rule whose trigger has non-local effects would need a
+    /// reconciles it. `MarkedBuildDirRule` satisfies this — it consults a sibling
+    /// marker file. A rule whose trigger has non-local effects would need a
     /// wider rescan scope than the event loop currently uses.
     fn triggers(&self) -> &'static [&'static str] {
         &[]
@@ -113,29 +113,43 @@ impl RuleEngine {
     }
 }
 
-/// Rule that matches the Rust build output directory `target` when a `Cargo.toml`
-/// exists in the same parent directory. This ensures we only ignore build artifacts
-/// for actual Cargo projects.
-pub(crate) struct RustTargetRule;
+/// Rule matching a build output directory only when a marker file exists in
+/// the same parent directory, so generic names like `target` or `build` are
+/// ignored only inside real projects. The markers double as `triggers()`:
+/// creating one schedules a scoped rescan that reconciles a pre-existing
+/// build directory (see `Rule::triggers`).
+pub(crate) struct MarkedBuildDirRule {
+    name: &'static str,
+    dir: &'static str,
+    markers: &'static [&'static str],
+}
 
-impl Rule for RustTargetRule {
+impl MarkedBuildDirRule {
+    pub(crate) const CARGO_TARGET: Self = Self {
+        name: "Cargo target directory",
+        dir: "target",
+        markers: &["Cargo.toml"],
+    };
+}
+
+impl Rule for MarkedBuildDirRule {
     fn name(&self) -> &'static str {
-        "Cargo target directory"
+        self.name
     }
 
     fn matches(&self, candidate: &Candidate<'_>) -> bool {
         // Check the directory name first to avoid unnecessary filesystem operations.
-        if !candidate.is_dir_named("target") {
+        if !candidate.is_dir_named(self.dir) {
             return false;
         }
 
-        // Ensure the parent contains a Cargo.toml so we only target Rust projects.
+        // Ensure the parent contains a marker file so we only match real projects.
         let Some(parent) = candidate.path.parent() else {
             return false;
         };
-
-        let cargo_toml = parent.join("Cargo.toml");
-        cargo_toml.exists()
+        self.markers
+            .iter()
+            .any(|marker| parent.join(marker).exists())
     }
 
     fn action(&self) -> MatchAction {
@@ -143,7 +157,7 @@ impl Rule for RustTargetRule {
     }
 
     fn triggers(&self) -> &'static [&'static str] {
-        &["Cargo.toml"]
+        self.markers
     }
 }
 
@@ -289,11 +303,10 @@ mod tests {
     }
 
     #[test]
-    fn rust_target_rule_requires_cargo_toml_in_parent() -> Result<()> {
+    fn cargo_target_rule_requires_cargo_toml_in_parent() -> Result<()> {
         let temp = TempDir::new().context("Failed to create temp dir")?;
         let project_root = temp.path();
-        let cargo_toml = project_root.join("Cargo.toml");
-        fs::write(&cargo_toml, b"[package]\nname=\"demo\"")?;
+        fs::write(project_root.join("Cargo.toml"), b"[package]\nname=\"demo\"")?;
 
         let target_dir = project_root.join("target");
         fs::create_dir(&target_dir)?;
@@ -304,7 +317,7 @@ mod tests {
             file_type: metadata.file_type(),
         };
         let engine = RuleEngine::new(vec![
-            Box::new(RustTargetRule),
+            Box::new(MarkedBuildDirRule::CARGO_TARGET),
             Box::new(ArtifactDirsRule::NODE_MODULES),
         ]);
 
@@ -315,6 +328,24 @@ mod tests {
         assert_eq!(result.name, "Cargo target directory");
         assert!(result.action.set_dropbox_ignore);
         assert!(result.action.skip_descendants);
+        Ok(())
+    }
+
+    #[test]
+    fn cargo_target_rule_ignores_target_without_cargo_toml() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let target_dir = temp.path().join("target");
+        fs::create_dir(&target_dir)?;
+
+        let metadata = fs::metadata(&target_dir)?;
+        let candidate = Candidate {
+            path: &target_dir,
+            file_type: metadata.file_type(),
+        };
+        assert!(
+            !MarkedBuildDirRule::CARGO_TARGET.matches(&candidate),
+            "target without a sibling Cargo.toml must not match"
+        );
         Ok(())
     }
 
@@ -355,13 +386,13 @@ mod tests {
     }
 
     #[test]
-    fn rust_target_rule_declares_cargo_toml_trigger() {
-        assert_eq!(RustTargetRule.triggers(), &["Cargo.toml"]);
+    fn cargo_target_rule_declares_cargo_toml_trigger() {
+        assert_eq!(MarkedBuildDirRule::CARGO_TARGET.triggers(), &["Cargo.toml"]);
     }
 
     #[test]
     fn rule_engine_recognizes_cargo_toml_trigger() {
-        let engine = RuleEngine::new(vec![Box::new(RustTargetRule)]);
+        let engine = RuleEngine::new(vec![Box::new(MarkedBuildDirRule::CARGO_TARGET)]);
         assert!(engine.is_trigger(OsStr::new("Cargo.toml")));
         assert!(!engine.is_trigger(OsStr::new("package.json")));
     }

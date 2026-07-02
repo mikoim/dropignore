@@ -1,7 +1,7 @@
 use crate::cli::CliArgs;
 use crate::discovery::{DiscoveredPaths, discover_watch_targets};
 use crate::dropbox::apply_dropbox_ignore;
-use crate::rules::{ArtifactDirsRule, Candidate, EggInfoRule, RuleEngine, RustTargetRule};
+use crate::rules::{ArtifactDirsRule, Candidate, EggInfoRule, MarkedBuildDirRule, RuleEngine};
 use crate::watch::{WatchRegistry, add_watch};
 use anyhow::{Context, Result};
 use inotify::{EventMask, Inotify};
@@ -25,7 +25,7 @@ pub(crate) fn run(args: CliArgs) -> Result<()> {
     let rule_engine = RuleEngine::new(vec![
         Box::new(ArtifactDirsRule::NODE_MODULES),
         Box::new(ArtifactDirsRule::PNPM_STORE),
-        Box::new(RustTargetRule),
+        Box::new(MarkedBuildDirRule::CARGO_TARGET),
         Box::new(ArtifactDirsRule::PYTHON_CACHES),
         Box::new(EggInfoRule),
         Box::new(ArtifactDirsRule::JS_BUILD),
@@ -565,7 +565,7 @@ mod tests {
         fs::create_dir_all(&target_debug)?;
         fs::create_dir(&src)?;
 
-        let rules = RuleEngine::new(vec![Box::new(RustTargetRule)]);
+        let rules = RuleEngine::new(vec![Box::new(MarkedBuildDirRule::CARGO_TARGET)]);
         let mut watcher = Inotify::init()?;
         let mut registry = WatchRegistry::default();
 
