@@ -972,4 +972,18 @@ mod tests {
         assert!(!action.watch_dir, "a non-directory must not be watched");
         Ok(())
     }
+
+    #[test]
+    fn ensure_directory_rejects_non_directory() -> Result<()> {
+        let temp = TempDir::new()?;
+        let file = temp.path().join("plain");
+        fs::write(&file, b"")?;
+
+        let err = ensure_directory(&file).expect_err("a regular file must be rejected");
+        assert!(
+            err.to_string().contains("is not a directory"),
+            "got: {err}"
+        );
+        Ok(())
+    }
 }
