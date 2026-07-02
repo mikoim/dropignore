@@ -1019,4 +1019,42 @@ mod tests {
         assert!(registry.contains_path(&root), "root stays watched");
         Ok(())
     }
+
+    #[test]
+    fn drain_events_rescans_when_trigger_file_appears() -> Result<()> {
+        use std::thread::sleep;
+        use std::time::{Duration, Instant};
+
+        let temp = TempDir::new()?;
+        let root = temp.path().to_path_buf();
+        let proj = root.join("proj");
+        let target = proj.join("target");
+        fs::create_dir_all(&target)?;
+
+        let rules = RuleEngine::new(vec![Box::new(MarkedBuildDirRule::CARGO_TARGET)]);
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+        let initial = discover_watch_targets(&root, &rules)?;
+        apply_discovered_paths(initial, true, &mut watcher, &mut registry)?;
+        assert!(
+            registry.contains_path(&target),
+            "target watched while no Cargo.toml exists"
+        );
+
+        fs::write(proj.join("Cargo.toml"), b"[package]\nname=\"demo\"")?;
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && registry.contains_path(&target) {
+            drain_events(&mut watcher, &mut registry, &rules, &root, true)?;
+            sleep(Duration::from_millis(20));
+        }
+
+        assert!(
+            !registry.contains_path(&target),
+            "trigger CREATE event must un-watch target via scoped rescan"
+        );
+        assert!(registry.contains_path(&proj), "project dir stays watched");
+        assert!(registry.contains_path(&root), "root stays watched");
+        Ok(())
+    }
 }
