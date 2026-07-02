@@ -82,21 +82,10 @@ pub(crate) fn apply_dropbox_ignore(path: &Path, dry_run: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::xattr_supported;
     use anyhow::Result;
     use std::fs;
     use tempfile::TempDir;
-
-    /// True when the filesystem hosting `path` accepts user.* xattrs. Used to
-    /// skip (not fail) on filesystems without support.
-    fn xattr_supported(path: &Path) -> bool {
-        let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
-        let c_name = CString::new("user.dropignore.probe").unwrap();
-        // SAFETY: pointers are valid for the duration of the call; the value
-        // is one byte and the length matches.
-        let result =
-            unsafe { libc::setxattr(c_path.as_ptr(), c_name.as_ptr(), b"1".as_ptr().cast(), 1, 0) };
-        result == 0
-    }
 
     #[test]
     fn already_marked_path_is_detected_and_skipped() -> Result<()> {

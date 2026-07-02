@@ -10,6 +10,8 @@ mod cli;
 mod discovery;
 mod dropbox;
 mod rules;
+#[cfg(test)]
+mod test_util;
 mod watch;
 
 use anyhow::Result;
