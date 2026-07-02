@@ -1093,4 +1093,60 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn drain_events_recovers_from_queue_overflow() -> Result<()> {
+        use std::thread::sleep;
+        use std::time::{Duration, Instant};
+
+        let max: usize = fs::read_to_string("/proc/sys/fs/inotify/max_queued_events")?
+            .trim()
+            .parse()?;
+        if max > 65536 {
+            eprintln!("skipping: max_queued_events={max} is too large to overflow in a test");
+            return Ok(());
+        }
+
+        let temp = TempDir::new()?;
+        let root = temp.path().to_path_buf();
+        let rules = engine();
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+        let initial = discover_watch_targets(&root, &rules)?;
+        apply_discovered_paths(initial, true, &mut watcher, &mut registry)?;
+
+        // Fill the kernel queue without draining so it genuinely overflows.
+        for i in 0..(max + 100) {
+            fs::write(root.join(format!("f{i}")), b"")?;
+        }
+
+        // Created while events are being dropped: their CREATE events are lost,
+        // so only the overflow rescan can discover them.
+        let late_dir = root.join("late_dir");
+        let nm = root.join("node_modules");
+        fs::create_dir(&late_dir)?;
+        fs::create_dir(&nm)?;
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && !registry.contains_path(&late_dir) {
+            drain_events(&mut watcher, &mut registry, &rules, &root, true)?;
+            sleep(Duration::from_millis(20));
+        }
+
+        assert!(
+            registry.contains_path(&late_dir),
+            "overflow rescan must find a directory whose CREATE was dropped"
+        );
+        assert!(
+            !registry.contains_path(&nm),
+            "overflow rescan must skip matched node_modules"
+        );
+        let fresh = discover_watch_targets(&root, &rules)?;
+        assert_eq!(
+            registry.watched_count(),
+            fresh.watchers.len(),
+            "registry must match a fresh discovery after overflow recovery"
+        );
+        Ok(())
+    }
 }
