@@ -192,8 +192,8 @@ const PYTHON_ARTIFACT_DIRS: &[&str] = &[
 ];
 
 /// JavaScript framework build output and tool cache directories matched by
-/// exact name. Each is reproducible and never holds user source. `.turbo` is
-/// Turborepo's local cache (verified against its docs).
+/// exact name. Each is a framework- or tool-owned reproducible cache that
+/// never holds user source.
 const JS_ARTIFACT_DIRS: &[&str] = &[
     ".next",
     ".nuxt",
@@ -246,7 +246,8 @@ impl ArtifactDirsRule {
         name: "IaC cache directory",
         dirs: &[".terraform", ".terragrunt-cache"],
     };
-    /// Dev-environment state dirs owned by direnv/devenv.
+    /// Dev-environment state dirs: `.direnv` is direnv's layout/cache dir,
+    /// `.devenv` is devenv's local state; both are regenerated on demand.
     pub(crate) const DEV_ENV_DIRS: Self = Self {
         name: "development environment directory",
         dirs: &[".direnv", ".devenv"],
