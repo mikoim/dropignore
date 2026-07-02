@@ -1,0 +1,11 @@
+[Unit]
+Description=Mark build artifacts as Dropbox-ignored
+After=default.target
+
+[Service]
+ExecStart=%h/.local/bin/dropignore %h/Dropbox
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -23,6 +23,7 @@ pub(crate) fn run(args: CliArgs) -> Result<()> {
     ensure_directory(&root)?;
 
     let rule_engine = RuleEngine::new(vec![
+        Box::new(ArtifactDirsRule::VCS_DIRS),
         Box::new(ArtifactDirsRule::NODE_MODULES),
         Box::new(ArtifactDirsRule::PNPM_STORE),
         Box::new(MarkedBuildDirRule::CARGO_TARGET),
@@ -34,6 +35,12 @@ pub(crate) fn run(args: CliArgs) -> Result<()> {
         Box::new(ArtifactDirsRule::JVM_CACHES),
         Box::new(ArtifactDirsRule::IAC_CACHES),
         Box::new(ArtifactDirsRule::DEV_ENV_DIRS),
+        Box::new(MarkedBuildDirRule::COMPOSER_VENDOR),
+        Box::new(MarkedBuildDirRule::MIX_BUILD),
+        Box::new(MarkedBuildDirRule::MIX_DEPS),
+        Box::new(MarkedBuildDirRule::ZIG_OUT),
+        Box::new(ArtifactDirsRule::ZIG_CACHES),
+        Box::new(ArtifactDirsRule::DART_CACHES),
     ]);
 
     if args.scan_once {
@@ -1291,6 +1298,51 @@ mod tests {
         };
         assert_eq!(len, 1, "attribute must be exactly one byte");
         assert_eq!(&value[..1], b"1", "attribute value must be \"1\"");
+        Ok(())
+    }
+
+    #[test]
+    fn drain_events_skips_new_vcs_dir() -> Result<()> {
+        use std::thread::sleep;
+        use std::time::{Duration, Instant};
+
+        let temp = TempDir::new()?;
+        let root = temp.path().to_path_buf();
+        let rules = RuleEngine::new(vec![
+            Box::new(ArtifactDirsRule::VCS_DIRS),
+            Box::new(ArtifactDirsRule::NODE_MODULES),
+        ]);
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+
+        let initial = discover_watch_targets(&root, &rules)?;
+        apply_discovered_paths(initial, true, &mut watcher, &mut registry)?;
+        assert!(
+            registry.contains_path(&root),
+            "root must be watched after seeding"
+        );
+
+        // .git is created first so its CREATE event drains no later than
+        // plain's, making the "not watched" assertion meaningful.
+        let git_dir = root.join(".git");
+        let plain = root.join("plain");
+        fs::create_dir(&git_dir)?;
+        fs::create_dir(&plain)?;
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !registry.contains_path(&plain) {
+            drain_events(&mut watcher, &mut registry, &rules, &root, true)?;
+            sleep(Duration::from_millis(20));
+        }
+
+        assert!(
+            registry.contains_path(&plain),
+            "a new plain dir must be watched via the event path"
+        );
+        assert!(
+            !registry.contains_path(&git_dir),
+            "a new .git dir must be skipped, not watched"
+        );
         Ok(())
     }
 }

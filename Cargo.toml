@@ -2,6 +2,8 @@
 name = "dropignore"
 version = "0.1.0"
 edition = "2024"
+description = "Watch a directory tree and mark build artifacts with Dropbox's ignore attribute"
+readme = "README.md"
 license = "MIT"
 repository = "https://github.com/mikoim/dropignore"
 
@@ -16,3 +18,7 @@ signal-hook = "0.3"
 
 [dev-dependencies]
 tempfile = "3.10"
+
+[profile.release]
+strip = true
+lto = "thin"
