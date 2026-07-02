@@ -198,10 +198,24 @@ fn drain_events(
             continue;
         }
 
-        // Remove bookkeeping for directories that disappeared or were moved,
-        // so stale mappings can't resolve later events to the wrong path.
-        if event.mask.contains(EventMask::DELETE_SELF) || event.mask.contains(EventMask::MOVE_SELF)
-        {
+        // A moved directory keeps its kernel watch, and MOVE_SELF fires only
+        // for the moved directory itself, so its descendants would keep stale
+        // registry entries and live kernel watches. Schedule a scoped rescan
+        // of the old path: the drain sweeps the whole stale subtree, and the
+        // reseed is a no-op when the path is gone (moved out of tree) or
+        // re-registers it when the descriptor was reused for a live path.
+        // An unknown descriptor means an earlier scope already drained it.
+        if event.mask.contains(EventMask::MOVE_SELF) {
+            if let Some(path) = registry.path_for(&event.wd) {
+                rescan_scopes.insert(path.clone());
+            }
+            continue;
+        }
+
+        // Deletion needs no rescan: the kernel auto-removes the watch, and a
+        // recursive delete fires DELETE_SELF for every directory, so dropping
+        // this one entry leaves nothing stale behind.
+        if event.mask.contains(EventMask::DELETE_SELF) {
             registry.remove_by_descriptor(&event.wd);
             continue;
         }
@@ -714,6 +728,103 @@ mod tests {
         assert!(
             !registry.contains_path(&nm),
             "node_modules must be skipped (matched), not watched"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn drain_events_prunes_subtree_moved_out_of_tree() -> Result<()> {
+        use std::thread::sleep;
+        use std::time::{Duration, Instant};
+
+        let temp = TempDir::new()?;
+        let outside = TempDir::new()?;
+        let root = temp.path().to_path_buf();
+        let a = root.join("a");
+        let a_x = a.join("x");
+        fs::create_dir_all(&a_x)?;
+
+        let rules = engine();
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+        let initial = discover_watch_targets(&root, &rules)?;
+        apply_discovered_paths(initial, true, &mut watcher, &mut registry)?;
+        assert!(registry.contains_path(&a_x), "a/x watched before the move");
+
+        fs::rename(&a, outside.path().join("a"))?;
+
+        // Drain until the stale entries disappear or the deadline passes.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline
+            && (registry.contains_path(&a) || registry.contains_path(&a_x))
+        {
+            drain_events(&mut watcher, &mut registry, &rules, &root, true)?;
+            sleep(Duration::from_millis(20));
+        }
+
+        assert!(!registry.contains_path(&a), "moved dir must be pruned");
+        assert!(
+            !registry.contains_path(&a_x),
+            "descendant of moved dir must be pruned"
+        );
+        let fresh = discover_watch_targets(&root, &rules)?;
+        assert_eq!(
+            registry.watched_count(),
+            fresh.watchers.len(),
+            "registry must match a fresh discovery of the root"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn drain_events_reconciles_in_tree_rename() -> Result<()> {
+        use std::thread::sleep;
+        use std::time::{Duration, Instant};
+
+        let temp = TempDir::new()?;
+        let root = temp.path().to_path_buf();
+        let a = root.join("a");
+        let a_x = a.join("x");
+        fs::create_dir_all(&a_x)?;
+
+        let rules = engine();
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+        let initial = discover_watch_targets(&root, &rules)?;
+        apply_discovered_paths(initial, true, &mut watcher, &mut registry)?;
+        assert!(
+            registry.contains_path(&a_x),
+            "a/x watched before the rename"
+        );
+
+        let b = root.join("b");
+        let b_x = b.join("x");
+        fs::rename(&a, &b)?;
+
+        // Drain until the new paths are watched and the old ones are gone.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline
+            && (!registry.contains_path(&b_x) || registry.contains_path(&a_x))
+        {
+            drain_events(&mut watcher, &mut registry, &rules, &root, true)?;
+            sleep(Duration::from_millis(20));
+        }
+
+        assert!(registry.contains_path(&b), "renamed dir must be watched");
+        assert!(
+            registry.contains_path(&b_x),
+            "descendant must follow the rename"
+        );
+        assert!(!registry.contains_path(&a), "old path must be pruned");
+        assert!(
+            !registry.contains_path(&a_x),
+            "old descendant must be pruned"
+        );
+        let fresh = discover_watch_targets(&root, &rules)?;
+        assert_eq!(
+            registry.watched_count(),
+            fresh.watchers.len(),
+            "registry must match a fresh discovery of the root"
         );
         Ok(())
     }
