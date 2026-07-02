@@ -54,15 +54,7 @@ No conflict constraints: `--scan-once --dry-run` is valid and useful
 
 `run()` keeps its shared prefix — canonicalize the root, `ensure_directory`,
 build the `RuleEngine` — then branches before any inotify or signal-handler
-setup:
-
-```rust
-if args.scan_once {
-    return scan_once(&root, args.dry_run, &rule_engine);
-}
-```
-
-`scan_once` reuses the existing discovery and application primitives. Like
+setup. `scan_once` reuses the existing discovery and application primitives. Like
 `apply_all`, it takes the application closure as a parameter so the bail path
 is testable without real xattr failures; `run()` passes the real
 `apply_dropbox_ignore`:
