@@ -75,8 +75,13 @@ fixture per rule category (each under its own `TempDir`):
 | a plain `src/` dir | no match |
 
 - These assertions catch a **dropped registration** (the rule stops
-  matching), a **wrong action** (e.g. `.git` marked instead of skip-only),
-  and the **VCS-first ordering intent** (`.git` resolves to `SKIP_ONLY`).
+  matching) and a **wrong action** (e.g. `.git` marked instead of skip-only,
+  so the `VCS_DIRS` rule must be present and wired to `SKIP_ONLY`). Note the
+  `.git` case does not by itself guard rule *ordering*: no marking rule
+  contends for the name `.git`, so it would pass even if `VCS_DIRS` were
+  registered last. The VCS-first ordering rationale lives in the doc comment
+  on `default_rules()`; the current ruleset has no name two rules could both
+  claim, so there is nothing for a behavioral ordering test to exercise.
 - Add a cheap tripwire: `assert_eq!(default_rules().len(), 18)` so an
   accidental duplicate or removal is flagged with a clear message. The
   constant is updated deliberately whenever a rule is added.
