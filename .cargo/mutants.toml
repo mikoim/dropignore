@@ -1,0 +1,14 @@
+# Mutation-testing scope (cargo-mutants, run via scripts/mutants.sh).
+# Every exclusion needs a comment saying why it is out of scope.
+
+# main() only wires env_logger + CLI parsing into run(); run() opens the
+# real inotify fd, installs signal handlers, and blocks — deliberately
+# outside unit-test scope (see docs/superpowers/specs/2026-07-16-*.md).
+exclude_globs = ["src/main.rs"]
+
+exclude_re = [
+    # app.rs run(): see above. Mutant names carry no module prefix for
+    # free functions, so match on file + function.
+    "src/app\\.rs.*(replace|delete).* in run($| )",
+    "src/app\\.rs.* replace run ",
+]
