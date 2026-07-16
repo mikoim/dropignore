@@ -1284,6 +1284,143 @@ mod tests {
     }
 
     #[test]
+    fn poll_inotify_times_out_on_quiet_fd() -> Result<()> {
+        let inotify = Inotify::init()?;
+
+        let result = poll_inotify(inotify.as_raw_fd(), 50)?;
+
+        assert!(
+            matches!(result, PollResult::TimedOut),
+            "a quiet fd must report a timeout, not readiness"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn poll_inotify_reports_interrupted_on_signal() -> Result<()> {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        // SIGUSR1's default action would terminate the process, so park a
+        // no-op flag handler on it first. poll(2) is never auto-restarted
+        // after a handled signal, regardless of SA_RESTART (signal(7)), so a
+        // signal landing while the thread sits in poll must surface as EINTR.
+        let flag = Arc::new(AtomicBool::new(false));
+        signal_hook::flag::register(signal_hook::consts::SIGUSR1, Arc::clone(&flag))?;
+
+        let inotify = Inotify::init()?;
+        let fd = inotify.as_raw_fd();
+
+        let (tx, rx) = mpsc::channel();
+        let poller = thread::spawn(move || {
+            tx.send(unsafe { libc::pthread_self() })
+                .expect("main test thread is waiting for the id");
+            // Long timeout: the poll must end via the signal, not the clock.
+            poll_inotify(fd, 30_000)
+        });
+        let poller_thread = rx.recv()?;
+
+        // Pepper the poller until its poll returns: a signal delivered before
+        // poll starts is absorbed by the handler, and the next one (5 ms
+        // later, against a 30 s window) lands inside poll and interrupts it.
+        while !poller.is_finished() {
+            // SAFETY: the thread id stays valid until `join`, and SIGUSR1 has
+            // a registered handler, so delivery cannot kill the process.
+            let _ = unsafe { libc::pthread_kill(poller_thread, libc::SIGUSR1) };
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let result = poller.join().expect("poller thread panicked")?;
+        assert!(
+            matches!(result, PollResult::Interrupted),
+            "a signal during poll must surface as Interrupted so the event \
+             loop re-checks its shutdown flag"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn drain_events_returns_ok_when_no_events_are_queued() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+
+        // Nothing is watched, so the non-blocking read reports WouldBlock.
+        let result = drain_events(&mut watcher, &mut registry, &engine(), temp.path(), true);
+
+        assert!(
+            result.is_ok(),
+            "an empty event queue is the loop's normal terminator, not an \
+             error: {result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn drain_events_propagates_fatal_read_error() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut watcher = Inotify::init()?;
+        let mut registry = WatchRegistry::default();
+
+        // Stage a fatal (non-WouldBlock) read error without ever freeing the
+        // fd number: dup2 atomically replaces the inotify descriptor with a
+        // write-only pipe end, so read(2) on it fails with EBADF while the
+        // number stays occupied (immune to fd-reuse races from parallel
+        // tests) and the wrapper's eventual close remains valid.
+        let mut pipe_fds = [0i32; 2];
+        // SAFETY: `pipe_fds` is a valid, writable 2-element array.
+        let ret = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) };
+        anyhow::ensure!(ret == 0, "pipe() failed");
+        // SAFETY: both descriptors are open and owned by this test; dup2
+        // closes the inotify fd and reuses its number for the write end.
+        let ret = unsafe { libc::dup2(pipe_fds[1], watcher.as_raw_fd()) };
+        anyhow::ensure!(ret != -1, "dup2() failed");
+
+        let result = drain_events(&mut watcher, &mut registry, &engine(), temp.path(), true);
+
+        // SAFETY: closing this test's own pipe descriptors exactly once; the
+        // duplicate under the wrapper's number is closed by `watcher`'s drop.
+        unsafe {
+            libc::close(pipe_fds[0]);
+            libc::close(pipe_fds[1]);
+        }
+
+        let err = result.expect_err("a fatal read error must propagate, not be swallowed");
+        assert!(
+            err.to_string().contains("Failed to read inotify events"),
+            "got: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_entry_never_marks_symlink_matching_rule_name() -> Result<()> {
+        let temp = TempDir::new()?;
+        let target = temp.path().join("real");
+        fs::create_dir(&target)?;
+        // EggInfoRule matches by name suffix alone (files included), so only
+        // the symlink guard keeps this candidate from being marked.
+        let link = temp.path().join("pkg.egg-info");
+        symlink(&target, &link)?;
+
+        let metadata = fs::symlink_metadata(&link)?;
+        let candidate = Candidate {
+            path: &link,
+            file_type: metadata.file_type(),
+        };
+        let rules = RuleEngine::new(vec![Box::new(EggInfoRule)]);
+        let action = plan_entry(&candidate, &rules);
+
+        assert!(
+            !action.apply_ignore,
+            "a symlink must never be marked, even when its name matches a rule"
+        );
+        assert!(!action.watch_dir, "a symlink must never be watched");
+        Ok(())
+    }
+
+    #[test]
     fn drain_events_skips_new_vcs_dir() -> Result<()> {
         use std::thread::sleep;
         use std::time::{Duration, Instant};
