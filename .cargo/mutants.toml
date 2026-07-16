@@ -37,12 +37,14 @@ exclude_re = [
     # rollup line; the return value, registry contents, xattr effects, and
     # watch registration are identical under every comparison operator.
     # This suite's contract surface is behavior, not log text.
+    # Log text is non-contractual in this project; exclusion approved by the maintainer (2026-07-16).
     "src/app\\.rs.*replace > with (==|<|>=) in apply_discovered_paths",
 
     # Log-only: log_matched emits one info!/debug! line and nothing else —
     # no return value, no state change — so replacing the body with () is
     # equivalent on the suite's contract surface (log text non-contractual,
     # same as the apply_discovered_paths rollup above).
+    # Log text is non-contractual in this project; exclusion approved by the maintainer (2026-07-16).
     "src/rules\\.rs.*replace RuleMatch::log_matched with \\(\\)",
 
     # Equivalent: leaking an empty Vec produces an empty &'static [&str] —
