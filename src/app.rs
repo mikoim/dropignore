@@ -1,7 +1,7 @@
 use crate::cli::CliArgs;
 use crate::discovery::{DiscoveredPaths, discover_matches, discover_watch_targets};
 use crate::dropbox::apply_dropbox_ignore;
-use crate::rules::{ArtifactDirsRule, Candidate, EggInfoRule, MarkedBuildDirRule, RuleEngine};
+use crate::rules::{Candidate, RuleEngine, default_rules};
 use crate::watch::{WatchRegistry, add_watch};
 use anyhow::{Context, Result};
 use inotify::{EventMask, Inotify};
@@ -22,26 +22,7 @@ pub(crate) fn run(args: CliArgs) -> Result<()> {
         .with_context(|| format!("Failed to resolve path: {}", args.root.display()))?;
     ensure_directory(&root)?;
 
-    let rule_engine = RuleEngine::new(vec![
-        Box::new(ArtifactDirsRule::VCS_DIRS),
-        Box::new(ArtifactDirsRule::NODE_MODULES),
-        Box::new(ArtifactDirsRule::PNPM_STORE),
-        Box::new(MarkedBuildDirRule::CARGO_TARGET),
-        Box::new(MarkedBuildDirRule::MAVEN_TARGET),
-        Box::new(MarkedBuildDirRule::GRADLE_BUILD),
-        Box::new(ArtifactDirsRule::PYTHON_CACHES),
-        Box::new(EggInfoRule),
-        Box::new(ArtifactDirsRule::JS_BUILD),
-        Box::new(ArtifactDirsRule::JVM_CACHES),
-        Box::new(ArtifactDirsRule::IAC_CACHES),
-        Box::new(ArtifactDirsRule::DEV_ENV_DIRS),
-        Box::new(MarkedBuildDirRule::COMPOSER_VENDOR),
-        Box::new(MarkedBuildDirRule::MIX_BUILD),
-        Box::new(MarkedBuildDirRule::MIX_DEPS),
-        Box::new(MarkedBuildDirRule::ZIG_OUT),
-        Box::new(ArtifactDirsRule::ZIG_CACHES),
-        Box::new(ArtifactDirsRule::DART_CACHES),
-    ]);
+    let rule_engine = RuleEngine::new(default_rules());
 
     if args.scan_once {
         return scan_once(&root, &rule_engine, |path| {
@@ -459,6 +440,7 @@ fn rescan_subtree(
 mod tests {
     use super::*;
     use crate::discovery::discover_watch_targets;
+    use crate::rules::{ArtifactDirsRule, EggInfoRule, MarkedBuildDirRule};
     use crate::test_util::xattr_supported;
     use crate::watch::{WatchRegistry, watch_mask};
     use anyhow::Result;

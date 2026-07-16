@@ -125,6 +125,35 @@ impl RuleEngine {
     }
 }
 
+/// The production ruleset, in priority order. `evaluate` returns the first
+/// match, so `VCS_DIRS` stays first: a version-control directory must resolve
+/// to skip-only before any marking rule can see it. This is the single
+/// registration site — adding a rule means adding one line here (and its
+/// constant above). Kept next to the rule definitions and out of the untested
+/// `run()` so a table-driven test can exercise the real set.
+pub(crate) fn default_rules() -> Vec<Box<dyn Rule>> {
+    vec![
+        Box::new(ArtifactDirsRule::VCS_DIRS),
+        Box::new(ArtifactDirsRule::NODE_MODULES),
+        Box::new(ArtifactDirsRule::PNPM_STORE),
+        Box::new(MarkedBuildDirRule::CARGO_TARGET),
+        Box::new(MarkedBuildDirRule::MAVEN_TARGET),
+        Box::new(MarkedBuildDirRule::GRADLE_BUILD),
+        Box::new(ArtifactDirsRule::PYTHON_CACHES),
+        Box::new(EggInfoRule),
+        Box::new(ArtifactDirsRule::JS_BUILD),
+        Box::new(ArtifactDirsRule::JVM_CACHES),
+        Box::new(ArtifactDirsRule::IAC_CACHES),
+        Box::new(ArtifactDirsRule::DEV_ENV_DIRS),
+        Box::new(MarkedBuildDirRule::COMPOSER_VENDOR),
+        Box::new(MarkedBuildDirRule::MIX_BUILD),
+        Box::new(MarkedBuildDirRule::MIX_DEPS),
+        Box::new(MarkedBuildDirRule::ZIG_OUT),
+        Box::new(ArtifactDirsRule::ZIG_CACHES),
+        Box::new(ArtifactDirsRule::DART_CACHES),
+    ]
+}
+
 /// Rule matching a build output directory only when a marker file exists in
 /// the same parent directory, so generic names like `target` or `build` are
 /// ignored only inside real projects. The markers double as `triggers()`:
@@ -1024,5 +1053,110 @@ mod tests {
             assert!(engine.is_trigger(OsStr::new(trigger)), "{trigger}");
         }
         assert!(!engine.is_trigger(OsStr::new("package.json")));
+    }
+
+    #[test]
+    fn default_rules_has_expected_count() {
+        // Tripwire: an accidental duplicate or dropped rule changes this
+        // count. Bump it deliberately when adding a rule.
+        assert_eq!(
+            default_rules().len(),
+            18,
+            "the production ruleset must have exactly 18 rules"
+        );
+    }
+
+    #[test]
+    fn default_rules_engine_matches_representative_fixtures() -> Result<()> {
+        let engine = RuleEngine::new(default_rules());
+
+        // Each fixture lives in its own TempDir so sibling markers never leak
+        // (e.g. a stray Cargo.toml making an unrelated `target` match).
+        // (dir_name, create_marker, is_file, expected_action)
+        // expected_action = None means "must not match".
+        struct Case {
+            entry: &'static str,
+            marker: Option<&'static str>,
+            is_file: bool,
+            expected: Option<MatchAction>,
+        }
+        let cases = [
+            Case {
+                entry: "node_modules",
+                marker: None,
+                is_file: false,
+                expected: Some(MatchAction::IGNORE_AND_SKIP),
+            },
+            Case {
+                entry: "target",
+                marker: Some("Cargo.toml"),
+                is_file: false,
+                expected: Some(MatchAction::IGNORE_AND_SKIP),
+            },
+            Case {
+                entry: "target",
+                marker: None,
+                is_file: false,
+                expected: None,
+            },
+            Case {
+                entry: ".venv",
+                marker: None,
+                is_file: false,
+                expected: Some(MatchAction::IGNORE_AND_SKIP),
+            },
+            Case {
+                entry: "pkg.egg-info",
+                marker: None,
+                is_file: true,
+                expected: Some(MatchAction::IGNORE_AND_SKIP),
+            },
+            Case {
+                entry: ".git",
+                marker: None,
+                is_file: false,
+                expected: Some(MatchAction::SKIP_ONLY),
+            },
+            Case {
+                entry: "src",
+                marker: None,
+                is_file: false,
+                expected: None,
+            },
+        ];
+
+        for case in cases {
+            let temp = TempDir::new().context("Failed to create temp dir")?;
+            if let Some(marker) = case.marker {
+                fs::write(temp.path().join(marker), b"")?;
+            }
+            let path = temp.path().join(case.entry);
+            if case.is_file {
+                fs::write(&path, b"")?;
+            } else {
+                fs::create_dir(&path)?;
+            }
+
+            let meta = fs::symlink_metadata(&path)?;
+            let candidate = Candidate {
+                path: &path,
+                file_type: meta.file_type(),
+            };
+            let result = engine.evaluate(&candidate);
+
+            match case.expected {
+                Some(action) => {
+                    let matched =
+                        result.unwrap_or_else(|| panic!("{} must match a rule", case.entry));
+                    assert_eq!(
+                        matched.action, action,
+                        "{} must resolve to {:?}",
+                        case.entry, action
+                    );
+                }
+                None => assert!(result.is_none(), "{} must not match any rule", case.entry),
+            }
+        }
+        Ok(())
     }
 }
