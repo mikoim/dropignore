@@ -607,6 +607,22 @@ mod tests {
     }
 
     #[test]
+    fn rules_without_trigger_override_declare_no_triggers() {
+        // The default `Rule::triggers` contract is "no trigger files". A
+        // non-empty default would make every non-overriding rule schedule
+        // subtree rescans for bogus filenames, so pin the emptiness itself
+        // rather than probing individual names.
+        assert!(
+            EggInfoRule.triggers().is_empty(),
+            "EggInfoRule must declare no triggers"
+        );
+        assert!(
+            ArtifactDirsRule::NODE_MODULES.triggers().is_empty(),
+            "ArtifactDirsRule must declare no triggers"
+        );
+    }
+
+    #[test]
     fn python_artifact_rule_matches_tool_caches() -> Result<()> {
         let temp = TempDir::new().context("Failed to create temp dir")?;
         let engine = RuleEngine::new(vec![Box::new(ArtifactDirsRule::PYTHON_CACHES)]);
