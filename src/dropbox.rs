@@ -116,4 +116,108 @@ mod tests {
         apply_dropbox_ignore(&file, true)?;
         Ok(())
     }
+
+    /// Read the attribute bytes back without going through
+    /// `is_already_ignored`, so tests can observe what is actually stored.
+    fn read_attr(c_path: &CString, c_name: &CString) -> Vec<u8> {
+        let mut buf = [0u8; 16];
+        // SAFETY: pointers are valid for the call; size matches the buffer.
+        let len = unsafe {
+            libc::getxattr(
+                c_path.as_ptr(),
+                c_name.as_ptr(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+            )
+        };
+        assert!(len >= 0, "getxattr must succeed for a stored attribute");
+        buf[..len as usize].to_vec()
+    }
+
+    #[test]
+    fn wrong_attribute_value_is_rewritten() -> Result<()> {
+        let temp = TempDir::new()?;
+        let file = temp.path().join("artifact");
+        fs::write(&file, b"")?;
+        if !xattr_supported(temp.path()) {
+            eprintln!("skipping: filesystem lacks user.* xattr support");
+            return Ok(());
+        }
+
+        let c_path = CString::new(file.as_os_str().as_bytes())?;
+        let c_name = CString::new(DROPBOX_IGNORE_ATTR)?;
+
+        // Pre-set the attribute to a same-length wrong value: the path must
+        // NOT count as marked, and apply must rewrite it to "1".
+        let wrong = b"0";
+        // SAFETY: pointers are valid for the call; sizes are correct.
+        let rc = unsafe {
+            libc::setxattr(
+                c_path.as_ptr(),
+                c_name.as_ptr(),
+                wrong.as_ptr().cast(),
+                wrong.len(),
+                0,
+            )
+        };
+        assert_eq!(rc, 0, "test setup: presetting the attribute must succeed");
+
+        apply_dropbox_ignore(&file, false)?;
+        assert_eq!(
+            read_attr(&c_path, &c_name),
+            DROPBOX_IGNORE_VALUE,
+            "a wrong stored value must be overwritten with \"1\""
+        );
+
+        // A longer stored value must also be rewritten (length mismatch path).
+        let long = b"10";
+        // SAFETY: as above.
+        let rc = unsafe {
+            libc::setxattr(
+                c_path.as_ptr(),
+                c_name.as_ptr(),
+                long.as_ptr().cast(),
+                long.len(),
+                0,
+            )
+        };
+        assert_eq!(rc, 0, "test setup: presetting the long value must succeed");
+
+        apply_dropbox_ignore(&file, false)?;
+        assert_eq!(
+            read_attr(&c_path, &c_name),
+            DROPBOX_IGNORE_VALUE,
+            "a longer stored value must be overwritten with \"1\""
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn setxattr_failure_is_reported_with_context() {
+        // A path that cannot exist: getxattr reads as "not marked", then
+        // setxattr fails with ENOENT and must surface as an error.
+        let missing = Path::new("/nonexistent-dropignore-test/artifact");
+        let err =
+            apply_dropbox_ignore(missing, false).expect_err("marking a nonexistent path must fail");
+        assert!(
+            format!("{err:#}").contains("setxattr failed"),
+            "error must name the failing call, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn interior_nul_in_path_is_rejected() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        use std::path::PathBuf;
+
+        let path = PathBuf::from(OsString::from_vec(b"bad\0path".to_vec()));
+        // dry_run=true: the NUL check fires before any filesystem access.
+        let err = apply_dropbox_ignore(&path, true)
+            .expect_err("a path with an interior NUL must be rejected");
+        assert!(
+            format!("{err:#}").contains("interior NUL"),
+            "error must explain the NUL rejection, got: {err:#}"
+        );
+    }
 }

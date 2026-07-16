@@ -1,4 +1,5 @@
 target/
+mutants.out/
 debug/
 release/
 *.rs.bk

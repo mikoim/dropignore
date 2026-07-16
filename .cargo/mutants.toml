@@ -1,0 +1,55 @@
+# Mutation-testing scope (cargo-mutants, run via scripts/mutants.sh).
+# Every exclusion needs a comment saying why it is out of scope.
+
+# main() only wires env_logger + CLI parsing into run(); run() opens the
+# real inotify fd, installs signal handlers, and blocks — deliberately
+# outside unit-test scope (see docs/superpowers/specs/2026-07-16-mutation-testing-validity-coverage-design.md).
+exclude_globs = ["src/main.rs"]
+
+exclude_re = [
+    # app.rs run(): see above. Mutant names carry no module prefix for
+    # free functions, so match on file + function.
+    "src/app\\.rs.*(replace|delete).* in run($| )",
+    "src/app\\.rs.* replace run ",
+
+    # Equivalent mutant: shrinking the getxattr buffer from len()+1 to
+    # len()*1 byte changes a length-mismatch result into an ERANGE result;
+    # both read as "not marked" and trigger the same rewrite. Proven
+    # equivalent in the 2026-07-16 triage (see the design spec).
+    "src/dropbox\\.rs.*replace \\+ with \\* in is_already_ignored",
+
+    # Equivalent (4 mutants, one per operator): the five WatchMask flags
+    # OR'd in watch_mask are single, pairwise-disjoint bits (MOVED_TO=0x80,
+    # CREATE=0x100, DELETE_SELF=0x400, MOVE_SELF=0x800, ONLYDIR=0x1000000;
+    # inotify-sys 0.1.7), and XOR equals OR on disjoint bit sets, so every
+    # |->^ builds the identical mask.
+    "src/watch\\.rs.*replace \\| with \\^ in watch_mask",
+
+    # Unconstructible distinguishing input: demoting this guard to false
+    # turns a real ENOSPC from fatal into warn-and-skip, but producing
+    # ENOSPC from inotify_add_watch requires exhausting the root-owned
+    # fs.inotify.max_user_watches sysctl — not deterministically stageable
+    # in a test. The guard->true and ==->!= variants are caught by
+    # add_watch_skips_nonexistent_path (ENOENT would turn fatal).
+    "src/watch\\.rs.*replace match guard err\\.raw_os_error\\(\\) == Some\\(libc::ENOSPC\\) with false in add_watch",
+
+    # Log-only divergence (3 mutants): `failures > 0` only gates a warn!
+    # rollup line; the return value, registry contents, xattr effects, and
+    # watch registration are identical under every comparison operator.
+    # This suite's contract surface is behavior, not log text.
+    # Log text is non-contractual in this project; exclusion approved by the maintainer (2026-07-16).
+    "src/app\\.rs.*replace > with (==|<|>=) in apply_discovered_paths",
+
+    # Log-only: log_matched emits one info!/debug! line and nothing else —
+    # no return value, no state change — so replacing the body with () is
+    # equivalent on the suite's contract surface (log text non-contractual,
+    # same as the apply_discovered_paths rollup above).
+    # Log text is non-contractual in this project; exclusion approved by the maintainer (2026-07-16).
+    "src/rules\\.rs.*replace RuleMatch::log_matched with \\(\\)",
+
+    # Equivalent: leaking an empty Vec produces an empty &'static [&str] —
+    # indistinguishable from the default `&[]` (length 0, no elements; slice
+    # identity is not observable). The non-empty vec![""]/vec!["xyzzy"]
+    # variants are killed by rules_without_trigger_override_declare_no_triggers.
+    "src/rules\\.rs.*replace Rule::triggers -> &'static\\[&'static str\\] with Vec::leak\\(Vec::new\\(\\)\\)",
+]

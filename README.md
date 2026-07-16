@@ -68,6 +68,26 @@ git config core.hooksPath .githooks
 ```
 Bypass in emergencies with `git commit --no-verify`.
 
+### Verifying the tests (mutation testing)
+
+`cargo test` proves the code passes the tests; mutation testing proves the
+tests catch bugs. `scripts/mutants.sh` runs [cargo-mutants] over the crate
+inside a Podman container (mutated code is untrusted, so the repository is
+mounted read-only and everything executes on a container-local copy):
+
+```bash
+./scripts/mutants.sh                  # full sweep (minutes)
+./scripts/mutants.sh -f src/rules.rs  # one file
+```
+
+Requires Podman. Results land in `mutants.out/` (gitignored); exit code 0
+means every mutant was caught (or unviable), 2 means survivors are listed in
+`mutants.out/mutants.out/missed.txt`. Scope and justified exclusions live
+in `.cargo/mutants.toml`. Run it after adding rules or refactoring
+match/apply logic.
+
+[cargo-mutants]: https://mutants.rs/
+
 ## Extending rules
 For a new "ignore directories with these exact names" rule, add the name to an
 existing `ArtifactDirsRule` list in `src/rules.rs` (or add a new associated
