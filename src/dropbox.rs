@@ -191,4 +191,33 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn setxattr_failure_is_reported_with_context() {
+        // A path that cannot exist: getxattr reads as "not marked", then
+        // setxattr fails with ENOENT and must surface as an error.
+        let missing = Path::new("/nonexistent-dropignore-test/artifact");
+        let err =
+            apply_dropbox_ignore(missing, false).expect_err("marking a nonexistent path must fail");
+        assert!(
+            format!("{err:#}").contains("setxattr failed"),
+            "error must name the failing call, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn interior_nul_in_path_is_rejected() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        use std::path::PathBuf;
+
+        let path = PathBuf::from(OsString::from_vec(b"bad\0path".to_vec()));
+        // dry_run=true: the NUL check fires before any filesystem access.
+        let err = apply_dropbox_ignore(&path, true)
+            .expect_err("a path with an interior NUL must be rejected");
+        assert!(
+            format!("{err:#}").contains("interior NUL"),
+            "error must explain the NUL rejection, got: {err:#}"
+        );
+    }
 }
