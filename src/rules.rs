@@ -125,6 +125,35 @@ impl RuleEngine {
     }
 }
 
+/// The production ruleset, in priority order. `evaluate` returns the first
+/// match, so `VCS_DIRS` stays first: a version-control directory must resolve
+/// to skip-only before any marking rule can see it. This is the single
+/// registration site — adding a rule means adding one line here (and its
+/// constant above). Kept next to the rule definitions and out of the untested
+/// `run()` so a table-driven test can exercise the real set.
+pub(crate) fn default_rules() -> Vec<Box<dyn Rule>> {
+    vec![
+        Box::new(ArtifactDirsRule::VCS_DIRS),
+        Box::new(ArtifactDirsRule::NODE_MODULES),
+        Box::new(ArtifactDirsRule::PNPM_STORE),
+        Box::new(MarkedBuildDirRule::CARGO_TARGET),
+        Box::new(MarkedBuildDirRule::MAVEN_TARGET),
+        Box::new(MarkedBuildDirRule::GRADLE_BUILD),
+        Box::new(ArtifactDirsRule::PYTHON_CACHES),
+        Box::new(EggInfoRule),
+        Box::new(ArtifactDirsRule::JS_BUILD),
+        Box::new(ArtifactDirsRule::JVM_CACHES),
+        Box::new(ArtifactDirsRule::IAC_CACHES),
+        Box::new(ArtifactDirsRule::DEV_ENV_DIRS),
+        Box::new(MarkedBuildDirRule::COMPOSER_VENDOR),
+        Box::new(MarkedBuildDirRule::MIX_BUILD),
+        Box::new(MarkedBuildDirRule::MIX_DEPS),
+        Box::new(MarkedBuildDirRule::ZIG_OUT),
+        Box::new(ArtifactDirsRule::ZIG_CACHES),
+        Box::new(ArtifactDirsRule::DART_CACHES),
+    ]
+}
+
 /// Rule matching a build output directory only when a marker file exists in
 /// the same parent directory, so generic names like `target` or `build` are
 /// ignored only inside real projects. The markers double as `triggers()`:
