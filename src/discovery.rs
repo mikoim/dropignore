@@ -130,6 +130,11 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    // Deliberately untested error arms in `walk` (deterministically
+    // unreachable from a test): per-entry iteration errors and
+    // `entry.file_type()` failures require a directory entry to vanish
+    // between readdir and stat — a race we cannot stage reliably.
+
     #[test]
     fn discover_watch_targets_skips_ignored_subtrees() -> Result<()> {
         let temp = TempDir::new().context("Failed to create temp dir")?;
@@ -322,6 +327,69 @@ mod tests {
         assert!(
             !discovered.matches.contains(&nm_in_git),
             "matches inside a skipped VCS dir must not be marked"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn walk_skips_symlinks_without_evaluating_them() -> Result<()> {
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let real_dir = temp.path().join("real");
+        fs::create_dir(&real_dir)?;
+        // A symlink whose NAME matches a rule: it must be skipped before
+        // rule evaluation, so it is neither marked nor watched.
+        let link = temp.path().join("node_modules");
+        std::os::unix::fs::symlink(&real_dir, &link)?;
+
+        let engine = RuleEngine::new(vec![Box::new(ArtifactDirsRule::NODE_MODULES)]);
+        let discovered = discover_watch_targets(temp.path(), &engine)?;
+
+        assert!(
+            discovered.matches.is_empty(),
+            "a symlink must never be marked, even with a matching name"
+        );
+        assert!(
+            !discovered.watchers.contains(&link),
+            "a symlink must not be watched"
+        );
+        assert!(
+            discovered.watchers.contains(&real_dir),
+            "the symlink target reached by its real path is still watched"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unreadable_directory_is_skipped_and_walk_continues() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().context("Failed to create temp dir")?;
+        let locked = temp.path().join("locked");
+        let open_dir = temp.path().join("open");
+        fs::create_dir(&locked)?;
+        fs::create_dir(&open_dir)?;
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000))?;
+
+        if fs::read_dir(&locked).is_ok() {
+            // Running as root (e.g. inside the mutation container):
+            // permission bits are not enforced, branch cannot be exercised.
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755))?;
+            eprintln!("skipping: read_dir succeeds despite 0o000 (running as root)");
+            return Ok(());
+        }
+
+        let engine = RuleEngine::new(vec![Box::new(ArtifactDirsRule::NODE_MODULES)]);
+        let result = discover_watch_targets(temp.path(), &engine);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755))?;
+        let discovered = result?;
+
+        assert!(
+            discovered.watchers.contains(&locked),
+            "the unreadable directory itself is still a watch target"
+        );
+        assert!(
+            discovered.watchers.contains(&open_dir),
+            "the walk must continue past an unreadable directory"
         );
         Ok(())
     }
