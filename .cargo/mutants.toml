@@ -11,4 +11,10 @@ exclude_re = [
     # free functions, so match on file + function.
     "src/app\\.rs.*(replace|delete).* in run($| )",
     "src/app\\.rs.* replace run ",
+
+    # Equivalent mutant: shrinking the getxattr buffer from len()+1 to
+    # len()*1 byte changes a length-mismatch result into an ERANGE result;
+    # both read as "not marked" and trigger the same rewrite. Proven
+    # equivalent in the 2026-07-16 triage (see the design spec).
+    "src/dropbox\\.rs.*replace \\+ with \\* in is_already_ignored",
 ]
