@@ -3,7 +3,7 @@
 
 # main() only wires env_logger + CLI parsing into run(); run() opens the
 # real inotify fd, installs signal handlers, and blocks — deliberately
-# outside unit-test scope (see docs/superpowers/specs/2026-07-16-*.md).
+# outside unit-test scope (see docs/superpowers/specs/2026-07-16-mutation-testing-validity-coverage-design.md).
 exclude_globs = ["src/main.rs"]
 
 exclude_re = [

@@ -81,7 +81,7 @@ mounted read-only and everything executes on a container-local copy):
 ```
 
 Requires Podman. Results land in `mutants.out/` (gitignored); exit code 0
-means every mutant was caught, 2 means survivors are listed in
+means every mutant was caught (or unviable), 2 means survivors are listed in
 `mutants.out/mutants.out/missed.txt`. Scope and justified exclusions live
 in `.cargo/mutants.toml`. Run it after adding rules or refactoring
 match/apply logic.
