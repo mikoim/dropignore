@@ -74,5 +74,5 @@ existing `ArtifactDirsRule` list in `src/rules.rs` (or add a new associated
 constant). For a build directory that should only match next to a project
 marker file (like Cargo's `target` next to `Cargo.toml`), add a
 `MarkedBuildDirRule` constant; its markers automatically become rescan
-triggers. Register new constants in `RuleEngine::new` in `src/app.rs`. For
+triggers. Register new constants in `default_rules` in `src/rules.rs`. For
 anything else, implement the `Rule` trait directly.
